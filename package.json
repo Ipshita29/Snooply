@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "A tiny developer companion that snoops around your dependencies.",
   "main": "index.js",
-  "bin":{
+  "bin": {
     "snooply": "./src/index.js"
   },
   "scripts": {
@@ -16,5 +16,8 @@
     "cli"
   ],
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "dependencies": {
+    "@babel/parser": "^7.29.8"
+  }
 }
