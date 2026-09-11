@@ -38,7 +38,14 @@ console.log("\nSnooply is checking your source files...\n");
 function getJavaScriptFiles(directory) {
   const files = [];
 
-  for (const item of fs.readdirSync(directory)) {
+  let entries;
+  try {
+    entries = fs.readdirSync(directory);
+  } catch (error) {
+    return files;
+  }
+
+  for (const item of entries) {
     if (
       item === "node_modules" ||
       item === ".git" ||
@@ -49,7 +56,13 @@ function getJavaScriptFiles(directory) {
     }
 
     const fullPath = path.join(directory, item);
-    const stats = fs.statSync(fullPath);
+
+    let stats;
+    try {
+      stats = fs.statSync(fullPath);
+    } catch (error) {
+      continue;
+    }
 
     if (stats.isDirectory()) {
       files.push(...getJavaScriptFiles(fullPath));
@@ -96,6 +109,12 @@ for (const filePath of files) {
         continue;
       }
 
+      if (node.specifiers.length === 0) {
+        // Side-effect-only import, e.g. `import "some-polyfill";` —
+        // it's real usage, we just can't attribute it to a named export.
+        usage[packageName].add("default");
+      }
+
       for (const specifier of node.specifiers) {
         if (specifier.type === "ImportSpecifier") {
           usage[packageName].add(specifier.imported.name);
@@ -112,28 +131,31 @@ for (const filePath of files) {
     }
 
     // CommonJS require
-    if (
-      node.type === "VariableDeclaration" &&
-      node.declarations[0]?.init?.type === "CallExpression" &&
-      node.declarations[0].init.callee.name === "require"
-    ) {
-      const packageName =
-        node.declarations[0].init.arguments[0]?.value;
-
-      if (!packageName || !dependencies.has(packageName)) {
-        continue;
-      }
-
-      const declaration = node.declarations[0];
-
-      if (declaration.id.type === "ObjectPattern") {
-        for (const property of declaration.id.properties) {
-          if (property.type === "ObjectProperty") {
-            usage[packageName].add(property.key.name);
-          }
+    if (node.type === "VariableDeclaration") {
+      for (const declaration of node.declarations) {
+        if (declaration.init?.type !== "CallExpression") {
+          continue;
         }
-      } else {
-        usage[packageName].add("default");
+
+        if (declaration.init.callee.name !== "require") {
+          continue;
+        }
+
+        const packageName = declaration.init.arguments[0]?.value;
+
+        if (!packageName || !dependencies.has(packageName)) {
+          continue;
+        }
+
+        if (declaration.id.type === "ObjectPattern") {
+          for (const property of declaration.id.properties) {
+            if (property.type === "ObjectProperty") {
+              usage[packageName].add(property.key.name);
+            }
+          }
+        } else {
+          usage[packageName].add("default");
+        }
       }
     }
   }
