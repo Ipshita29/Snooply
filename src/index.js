@@ -18,9 +18,13 @@ const packageJson = JSON.parse(
   fs.readFileSync(packageJsonPath, "utf-8")
 );
 
+const devDependencyNames = new Set(
+  Object.keys(packageJson.devDependencies || {})
+);
+
 const dependencies = new Set([
   ...Object.keys(packageJson.dependencies || {}),
-  ...Object.keys(packageJson.devDependencies || {}),
+  ...devDependencyNames,
 ]);
 
 console.log("\nSnooply found your dependencies:\n");
@@ -142,5 +146,96 @@ for (const [dependency, used] of Object.entries(usage)) {
     console.log(`• ${dependency}: not detected`);
   } else {
     console.log(`• ${dependency}: ${[...used].join(", ")}`);
+  }
+}
+
+// --- Recommendation engine ---
+//
+// Turns raw usage evidence into a verdict. Never based on percentages —
+// only on how many distinct named imports we actually observed.
+
+const WHOLE_MODULE_MARKERS = new Set(["default", "*"]);
+const FEW_FUNCTIONS_LIMIT = 2;
+
+function classifyDependency(name, used, isDevDependency) {
+  const namedUsage = [...used].filter(
+    (importedName) => !WHOLE_MODULE_MARKERS.has(importedName)
+  );
+  const importsWholeModule = [...used].some((importedName) =>
+    WHOLE_MODULE_MARKERS.has(importedName)
+  );
+
+  if (used.size === 0) {
+    if (isDevDependency) {
+      return {
+        status: "NOT_ENOUGH_EVIDENCE",
+        reason: `${name} is a devDependency with no detected source imports, which is normal for build/lint/test tooling.`,
+      };
+    }
+
+    return {
+      status: "UNUSED",
+      reason: `Snooply didn't find \`${name}\` imported anywhere in your code.`,
+    };
+  }
+
+  if (namedUsage.length === 0 && importsWholeModule) {
+    return {
+      status: "NOT_ENOUGH_EVIDENCE",
+      reason: `\`${name}\` is only ever imported as a whole module, so Snooply can't tell which parts of it you actually use.`,
+    };
+  }
+
+  if (namedUsage.length <= FEW_FUNCTIONS_LIMIT) {
+    return {
+      status: "WORTH_LOOKING_AT",
+      used: namedUsage,
+      reason: `You're using only ${formatList(namedUsage)} from \`${name}\`.`,
+    };
+  }
+
+  return {
+    status: "DO_NOT_FLAG",
+    used: namedUsage,
+    reason: `You're using ${namedUsage.length} different exports from \`${name}\` (${namedUsage.join(", ")}).`,
+  };
+}
+
+function formatList(names) {
+  return names.map((n) => `\`${n}\``).join(" and ");
+}
+
+const recommendations = [];
+const unused = [];
+
+for (const [dependency, used] of Object.entries(usage)) {
+  const result = classifyDependency(
+    dependency,
+    used,
+    devDependencyNames.has(dependency)
+  );
+
+  if (result.status === "WORTH_LOOKING_AT") {
+    recommendations.push({ dependency, ...result });
+  } else if (result.status === "UNUSED") {
+    unused.push({ dependency, ...result });
+  }
+}
+
+console.log("\n" + "=".repeat(40) + "\n");
+
+if (recommendations.length === 0 && unused.length === 0) {
+  console.log("🐾 Snooply looked around and everything checks out!\n");
+} else {
+  for (const { reason } of recommendations) {
+    console.log("🐾 Snooply found something!\n");
+    console.log(reason + "\n");
+    console.log("💡 You might not need the whole package.\n");
+  }
+
+  for (const { reason } of unused) {
+    console.log("🐾 Snooply found something!\n");
+    console.log(reason + "\n");
+    console.log("💡 You might not need this dependency at all.\n");
   }
 }
