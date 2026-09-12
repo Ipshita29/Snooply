@@ -58,6 +58,4 @@ Unused dependencies are called out too, separately, since they might not be need
 
 ## Status
 
-This is the MVP core: dependency discovery, usage analysis, the recommendation engine, curated suggestions, and a small native popup for the result. It currently works on JavaScript projects (`.js`/`.jsx`, ES modules and CommonJS). Support for other languages or frameworks isn't implemented yet.
-
-A proper UI (replacing the current native popup) is planned next.
+This is the MVP core: dependency discovery, usage analysis, the recommendation engine, curated suggestions, and a small transparent overlay notification (a React UI) that appears over your editor with the result. It currently works on JavaScript projects (`.js`/`.jsx`, ES modules and CommonJS). Support for other languages or frameworks isn't implemented yet.

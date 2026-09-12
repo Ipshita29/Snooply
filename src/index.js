@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
 const readline = require("readline");
-const { execSync } = require("child_process");
+const http = require("http");
+const { spawn } = require("child_process");
 const parser = require("@babel/parser");
 
 // --- Status animation ---
@@ -331,201 +331,179 @@ function buildResults(usage, devDependencyNames) {
 
 // --- Popup UI ---
 //
-// Displays the structured data already produced by the recommendation and
-// suggestion engines above — it never recomputes a verdict or a suggestion
-// itself. Implemented as native macOS dialogs (via osascript) so there's no
-// UI framework, browser, or extra dependency involved. Each "screen" is one
-// small, disposable AppleScript process; nothing lingers after it closes.
+// A small React app renders the structured data already produced by the
+// recommendation and suggestion engines above — it never recomputes a
+// verdict or a suggestion itself, it only displays what it's given. It's
+// served from a tiny local HTTP server (Node's built-in `http`, no
+// framework) and opened as a compact app-style window. The server shuts
+// itself down as soon as the page is closed, so nothing lingers in the
+// background — see the heartbeat/close handling below.
 
-function escapeAppleScript(text) {
-  return String(text).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+const UI_DIR = path.join(__dirname, "ui");
+const NODE_MODULES_DIR = path.join(__dirname, "..", "node_modules");
+
+function readUiFile(...segments) {
+  return fs.readFileSync(path.join(...segments), "utf-8");
 }
 
-function runAppleScript(script) {
-  const tmpFile = path.join(os.tmpdir(), `snooply-popup-${Date.now()}.applescript`);
-  fs.writeFileSync(tmpFile, script, "utf-8");
-
+function resolveElectronBinary() {
   try {
-    return execSync(`osascript "${tmpFile}"`, { stdio: ["ignore", "pipe", "ignore"] })
-      .toString()
-      .trim();
-  } finally {
-    fs.unlinkSync(tmpFile);
-  }
-}
-
-function showDialog(text, buttons, defaultButton) {
-  const buttonList = buttons.map((b) => `"${escapeAppleScript(b)}"`).join(", ");
-  const script = [
-    `set dialogResult to display dialog "${escapeAppleScript(text)}" with title "🐾 Snooply" buttons {${buttonList}} default button "${escapeAppleScript(defaultButton)}" with icon note`,
-    "button returned of dialogResult",
-  ].join("\n");
-
-  try {
-    return runAppleScript(script);
-  } catch (error) {
-    return null;
-  }
-}
-
-function chooseFromList(items, prompt) {
-  const itemList = items.map((i) => `"${escapeAppleScript(i)}"`).join(", ");
-  const script = [
-    `set chosen to choose from list {${itemList}} with title "🐾 Snooply" with prompt "${escapeAppleScript(prompt)}"`,
-    "if chosen is false then",
-    '  return "CANCELLED"',
-    "end if",
-    "item 1 of chosen",
-  ].join("\n");
-
-  try {
-    return runAppleScript(script);
-  } catch (error) {
-    return null;
-  }
-}
-
-function fallbackSuggestionFor(item) {
-  // Recommendations always carry a suggestion by this point (see
-  // buildResults); only unused dependencies ever fall through to this.
-  return item.suggestion || "You might not need this dependency at all.";
-}
-
-function buildExploreText(item) {
-  return [
-    "Dependency:",
-    item.dependency,
-    "",
-    "Used:",
-    item.used.length ? item.used.join(", ") : "none detected",
-    "",
-    "Reason:",
-    item.reason,
-    "",
-    "Suggestion:",
-    fallbackSuggestionFor(item),
-  ].join("\n");
-}
-
-function exploreItem(item) {
-  showDialog(buildExploreText(item), ["Close"], "Close");
-}
-
-function buildAllDependenciesText(dependencies, usage) {
-  const lines = [...dependencies].map((dependency) => {
-    const used = usage[dependency];
-    return used && used.size > 0
-      ? `• ${dependency}: ${[...used].join(", ")}`
-      : `• ${dependency}: not detected`;
-  });
-
-  return ["All dependencies:", "", ...lines].join("\n");
-}
-
-function showAllDependencies(dependencies, usage) {
-  showDialog(buildAllDependenciesText(dependencies, usage), ["Close"], "Close");
-}
-
-function showSingleRecommendationPopup(item, dependencies, usage) {
-  const text = [
-    "🐾",
-    "",
-    "Snooply found something!",
-    "",
-    item.reason,
-    "",
-    `💡 ${fallbackSuggestionFor(item)}`,
-  ].join("\n");
-
-  const button = showDialog(text, ["Close", "See all dependencies", "Explore"], "Explore");
-
-  if (button === "Explore") {
-    exploreItem(item);
-  } else if (button === "See all dependencies") {
-    showAllDependencies(dependencies, usage);
-  }
-}
-
-function showMultipleRecommendationsPopup(items, dependencies, usage) {
-  const sections = items.map((item) => {
-    const usedBlock = item.used.length
-      ? ["You're only using:", ...item.used.map((fn) => `✓ ${fn}`)].join("\n")
-      : item.reason;
-
-    return [item.dependency, "", usedBlock, "", `💡 ${fallbackSuggestionFor(item)}`].join("\n");
-  });
-
-  const text = [
-    `🐾 Snooply found ${items.length} things!`,
-    "",
-    "I think these are worth a look 👀",
-    "",
-    sections.join("\n\n━━━━━━━━━━━━━━━━━━\n\n"),
-  ].join("\n");
-
-  const button = showDialog(text, ["Close", "See all dependencies", "Explore"], "Explore");
-
-  if (button === "Explore") {
-    const names = items.map((item) => item.dependency);
-    const chosen = chooseFromList(names, "Which dependency would you like to explore?");
-    const chosenItem = items.find((item) => item.dependency === chosen);
-
-    if (chosenItem) {
-      exploreItem(chosenItem);
+    // Required from a plain Node process (not from inside Electron itself),
+    // the `electron` package's main export is the path to its binary.
+    const electronPath = require("electron");
+    if (typeof electronPath === "string" && fs.existsSync(electronPath)) {
+      return electronPath;
     }
-  } else if (button === "See all dependencies") {
-    showAllDependencies(dependencies, usage);
-  }
-}
-
-function showNoRecommendationsPopup(dependencies, usage) {
-  const text = [
-    "🐾",
-    "",
-    "Snooply took a little look…",
-    "",
-    "Everything looks pretty reasonable! ♡",
-    "",
-    "Nothing worth bothering you about right now.",
-  ].join("\n");
-
-  const button = showDialog(text, ["Close", "See all dependencies"], "Close");
-
-  if (button === "See all dependencies") {
-    showAllDependencies(dependencies, usage);
-  }
-}
-
-function isPopupSupported() {
-  if (process.platform !== "darwin") {
-    return false;
-  }
-
-  try {
-    execSync("which osascript", { stdio: "ignore" });
-    return true;
   } catch (error) {
-    return false;
+    // Not installed / failed to resolve — fall back below.
   }
+  return null;
 }
 
-function showPopup(flaggedItems, dependencies, usage) {
-  if (!isPopupSupported()) {
-    console.log("(Popup isn't available on this platform yet — terminal output above is it for now.)");
+function openPopupWindowInBrowser(url) {
+  if (process.platform === "darwin") {
+    const appModeCandidates = [
+      "/Applications/Google Chrome.app",
+      "/Applications/Microsoft Edge.app",
+      "/Applications/Brave Browser.app",
+      "/Applications/Chromium.app",
+    ];
+
+    for (const appPath of appModeCandidates) {
+      if (fs.existsSync(appPath)) {
+        spawn("open", ["-na", appPath, "--args", `--app=${url}`, "--window-size=420,620"], {
+          stdio: "ignore",
+          detached: true,
+        }).unref();
+        return;
+      }
+    }
+
+    spawn("open", [url], { stdio: "ignore", detached: true }).unref();
     return;
   }
 
-  try {
-    if (flaggedItems.length === 0) {
-      showNoRecommendationsPopup(dependencies, usage);
-    } else if (flaggedItems.length === 1) {
-      showSingleRecommendationPopup(flaggedItems[0], dependencies, usage);
-    } else {
-      showMultipleRecommendationsPopup(flaggedItems, dependencies, usage);
-    }
-  } catch (error) {
-    // Popup dismissed or unavailable mid-flow — never crash the CLI over it.
+  if (process.platform === "win32") {
+    spawn("cmd", ["/c", "start", "", url], { stdio: "ignore", detached: true, shell: true }).unref();
+    return;
   }
+
+  spawn("xdg-open", [url], { stdio: "ignore", detached: true }).unref();
+}
+
+function openPopupWindow(url) {
+  const electronBinary = resolveElectronBinary();
+
+  if (electronBinary) {
+    // A real transparent, frameless, always-on-top overlay window — this is
+    // what makes it feel like a notification over the editor rather than a
+    // separate application. If the parent shell has ELECTRON_RUN_AS_NODE set
+    // (common when Snooply itself is launched from inside an Electron-based
+    // tool, e.g. a VS Code terminal), it leaks into this child and forces
+    // Electron to run as plain Node instead of a real app — strip it.
+    const env = { ...process.env };
+    delete env.ELECTRON_RUN_AS_NODE;
+
+    spawn(electronBinary, [path.join(UI_DIR, "electron-main.js"), url], {
+      stdio: "ignore",
+      detached: true,
+      env,
+    }).unref();
+    return;
+  }
+
+  // Electron unavailable for some reason — degrade to a plain app-style
+  // browser window rather than failing outright.
+  openPopupWindowInBrowser(url);
+}
+
+function showReactPopup(flaggedItems, dependencies, usage) {
+  return new Promise((resolve) => {
+    const payload = {
+      items: flaggedItems,
+      dependencies: [...dependencies],
+      usage: Object.fromEntries([...dependencies].map((dep) => [dep, [...(usage[dep] || [])]])),
+    };
+
+    let firstPingReceived = false;
+    let lastPingAt = Date.now();
+    let finished = false;
+
+    const finish = () => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      clearInterval(heartbeatCheck);
+      clearTimeout(launchTimeout);
+      if (typeof server.closeAllConnections === "function") {
+        server.closeAllConnections();
+      }
+      server.close();
+      resolve();
+    };
+
+    const server = http.createServer((req, res) => {
+      const url = req.url.split("?")[0];
+
+      try {
+        if (url === "/") {
+          const html = readUiFile(UI_DIR, "index.html").replace(
+            "__SNOOPLY_DATA__",
+            JSON.stringify(payload).replace(/</g, "\\u003c")
+          );
+          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+          res.end(html);
+        } else if (url === "/app.js") {
+          res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8" });
+          res.end(readUiFile(UI_DIR, "app.js"));
+        } else if (url === "/react.js") {
+          res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8" });
+          res.end(readUiFile(NODE_MODULES_DIR, "react", "umd", "react.production.min.js"));
+        } else if (url === "/react-dom.js") {
+          res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8" });
+          res.end(readUiFile(NODE_MODULES_DIR, "react-dom", "umd", "react-dom.production.min.js"));
+        } else if (url === "/ping") {
+          firstPingReceived = true;
+          lastPingAt = Date.now();
+          res.writeHead(204);
+          res.end();
+        } else if (url === "/close") {
+          res.writeHead(204);
+          res.end();
+          finish();
+        } else {
+          res.writeHead(404);
+          res.end();
+        }
+      } catch (error) {
+        res.writeHead(500);
+        res.end();
+      }
+    });
+
+    // Once the page has loaded and started pinging, a missed heartbeat means
+    // the window was closed (directly, not via our Close button) — shut down.
+    const heartbeatCheck = setInterval(() => {
+      if (firstPingReceived && Date.now() - lastPingAt > 5000) {
+        finish();
+      }
+    }, 1000);
+
+    // Safety net in case the window never opens/loads at all.
+    const launchTimeout = setTimeout(() => {
+      if (!firstPingReceived) {
+        finish();
+      }
+    }, 30000);
+
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address();
+      openPopupWindow(`http://127.0.0.1:${port}/`);
+    });
+
+    server.on("error", () => finish());
+  });
 }
 
 async function main() {
@@ -583,7 +561,10 @@ async function main() {
 
   console.log("\n" + "=".repeat(40) + "\n");
 
-  const flaggedItems = [...recommendations, ...unused];
+  const flaggedItems = [
+    ...recommendations.map((item) => ({ ...item, kind: "WORTH_LOOKING_AT" })),
+    ...unused.map((item) => ({ ...item, kind: "UNUSED" })),
+  ];
 
   if (flaggedItems.length === 0) {
     console.log("🐾 Snooply took a little look...");
@@ -594,7 +575,7 @@ async function main() {
     console.log(`🐾 Snooply found ${flaggedItems.length} things!`);
   }
 
-  showPopup(flaggedItems, dependencies, usage);
+  await showReactPopup(flaggedItems, dependencies, usage);
 }
 
 main().catch(() => {
