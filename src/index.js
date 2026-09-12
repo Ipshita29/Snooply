@@ -227,6 +227,54 @@ function formatList(names) {
   return names.map((n) => `\`${n}\``).join(" and ");
 }
 
+// --- Suggestion engine ---
+//
+// Purely additive: it never influences `status` from the recommendation
+// engine above. It only speaks up when we have a confident, curated
+// alternative for EVERY named function actually used — if even one used
+// function has no known alternative, it stays quiet rather than guessing.
+
+const KNOWN_ALTERNATIVES = {
+  lodash: {
+    debounce: "a small debounce utility",
+    throttle: "a small throttle utility",
+  },
+};
+
+function getSuggestion(dependency, namedUsage) {
+  const known = KNOWN_ALTERNATIVES[dependency];
+
+  if (!known || namedUsage.length === 0) {
+    return null;
+  }
+
+  const alternatives = [];
+
+  for (const fn of namedUsage) {
+    if (!known[fn]) {
+      return null;
+    }
+
+    if (!alternatives.includes(known[fn])) {
+      alternatives.push(known[fn]);
+    }
+  }
+
+  return `${capitalize(joinWithAnd(alternatives))} may work here instead of the whole package.`;
+}
+
+function joinWithAnd(items) {
+  if (items.length === 1) {
+    return items[0];
+  }
+
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+function capitalize(text) {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 const recommendations = [];
 const unused = [];
 
@@ -238,9 +286,23 @@ for (const [dependency, used] of Object.entries(usage)) {
   );
 
   if (result.status === "WORTH_LOOKING_AT") {
-    recommendations.push({ dependency, ...result });
+    const suggestion = getSuggestion(dependency, result.used);
+
+    recommendations.push({
+      dependency,
+      used: result.used,
+      reason: result.reason,
+      suggestion,
+      hasAlternative: suggestion !== null,
+    });
   } else if (result.status === "UNUSED") {
-    unused.push({ dependency, ...result });
+    unused.push({
+      dependency,
+      used: [],
+      reason: result.reason,
+      suggestion: null,
+      hasAlternative: false,
+    });
   }
 }
 
@@ -249,10 +311,10 @@ console.log("\n" + "=".repeat(40) + "\n");
 if (recommendations.length === 0 && unused.length === 0) {
   console.log("🐾 Snooply looked around and everything checks out!\n");
 } else {
-  for (const { reason } of recommendations) {
+  for (const { reason, suggestion } of recommendations) {
     console.log("🐾 Snooply found something!\n");
     console.log(reason + "\n");
-    console.log("💡 You might not need the whole package.\n");
+    console.log(`💡 ${suggestion || "You might not need the whole package."}\n`);
   }
 
   for (const { reason } of unused) {
