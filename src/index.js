@@ -2,38 +2,44 @@
 
 const fs = require("fs");
 const path = require("path");
+const readline = require("readline");
 const parser = require("@babel/parser");
 
-console.log("Snooply is snooping around your project...");
+// --- Status animation ---
+//
+// One updating line instead of a permanent scroll of messages. No fake
+// percentages — just qualitative "Snooply is working" flavor text that
+// rotates while real work happens.
 
-const projectPath = process.cwd();
-const packageJsonPath = path.join(projectPath, "package.json");
+const STATUS_MESSAGES = [
+  "🐾 Snooply is snooping around your project...",
+  "🐾 Snooply is sniffing through your dependencies...",
+  "🐾 Snooply is having a little look...",
+  "🐾 Snooply found something interesting...",
+  "🐾 Snooply is putting the pieces together...",
+];
 
-if (!fs.existsSync(packageJsonPath)) {
-  console.log("Snooply couldn't find a package.json here.");
-  process.exit(1);
+function startStatusAnimation(messages, intervalMs = 1400) {
+  let index = 0;
+  process.stdout.write(messages[0]);
+
+  const timer = setInterval(() => {
+    index = (index + 1) % messages.length;
+    readline.clearLine(process.stdout, 0);
+    readline.cursorTo(process.stdout, 0);
+    process.stdout.write(messages[index]);
+  }, intervalMs);
+
+  return function stopStatusAnimation() {
+    clearInterval(timer);
+    readline.clearLine(process.stdout, 0);
+    readline.cursorTo(process.stdout, 0);
+  };
 }
 
-const packageJson = JSON.parse(
-  fs.readFileSync(packageJsonPath, "utf-8")
-);
-
-const devDependencyNames = new Set(
-  Object.keys(packageJson.devDependencies || {})
-);
-
-const dependencies = new Set([
-  ...Object.keys(packageJson.dependencies || {}),
-  ...devDependencyNames,
-]);
-
-console.log("\nSnooply found your dependencies:\n");
-
-for (const dependency of dependencies) {
-  console.log(`• ${dependency}`);
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
-console.log("\nSnooply is checking your source files...\n");
 
 function getJavaScriptFiles(directory) {
   const files = [];
@@ -77,98 +83,97 @@ function getJavaScriptFiles(directory) {
   return files;
 }
 
-const files = getJavaScriptFiles(projectPath);
+async function analyzeUsage(projectPath, dependencies) {
+  const files = getJavaScriptFiles(projectPath);
+  const usage = {};
 
-const usage = {};
-
-for (const dependency of dependencies) {
-  usage[dependency] = new Set();
-}
-
-for (const filePath of files) {
-  const code = fs.readFileSync(filePath, "utf-8");
-
-  let ast;
-
-  try {
-    ast = parser.parse(code, {
-      sourceType: "unambiguous",
-      plugins: ["jsx"],
-    });
-  } catch (error) {
-    continue;
+  for (const dependency of dependencies) {
+    usage[dependency] = new Set();
   }
 
-  for (const node of ast.program.body) {
+  for (let i = 0; i < files.length; i++) {
+    const code = fs.readFileSync(files[i], "utf-8");
 
-    // ES module imports
-    if (node.type === "ImportDeclaration") {
-      const packageName = node.source.value;
+    let ast;
 
-      if (!dependencies.has(packageName)) {
-        continue;
-      }
+    try {
+      ast = parser.parse(code, {
+        sourceType: "unambiguous",
+        plugins: ["jsx"],
+      });
+    } catch (error) {
+      continue;
+    }
 
-      if (node.specifiers.length === 0) {
-        // Side-effect-only import, e.g. `import "some-polyfill";` —
-        // it's real usage, we just can't attribute it to a named export.
-        usage[packageName].add("default");
-      }
+    for (const node of ast.program.body) {
 
-      for (const specifier of node.specifiers) {
-        if (specifier.type === "ImportSpecifier") {
-          usage[packageName].add(specifier.imported.name);
+      // ES module imports
+      if (node.type === "ImportDeclaration") {
+        const packageName = node.source.value;
+
+        if (!dependencies.has(packageName)) {
+          continue;
         }
 
-        if (specifier.type === "ImportDefaultSpecifier") {
+        if (node.specifiers.length === 0) {
+          // Side-effect-only import, e.g. `import "some-polyfill";` —
+          // it's real usage, we just can't attribute it to a named export.
           usage[packageName].add("default");
         }
 
-        if (specifier.type === "ImportNamespaceSpecifier") {
-          usage[packageName].add("*");
-        }
-      }
-    }
-
-    // CommonJS require
-    if (node.type === "VariableDeclaration") {
-      for (const declaration of node.declarations) {
-        if (declaration.init?.type !== "CallExpression") {
-          continue;
-        }
-
-        if (declaration.init.callee.name !== "require") {
-          continue;
-        }
-
-        const packageName = declaration.init.arguments[0]?.value;
-
-        if (!packageName || !dependencies.has(packageName)) {
-          continue;
-        }
-
-        if (declaration.id.type === "ObjectPattern") {
-          for (const property of declaration.id.properties) {
-            if (property.type === "ObjectProperty") {
-              usage[packageName].add(property.key.name);
-            }
+        for (const specifier of node.specifiers) {
+          if (specifier.type === "ImportSpecifier") {
+            usage[packageName].add(specifier.imported.name);
           }
-        } else {
-          usage[packageName].add("default");
+
+          if (specifier.type === "ImportDefaultSpecifier") {
+            usage[packageName].add("default");
+          }
+
+          if (specifier.type === "ImportNamespaceSpecifier") {
+            usage[packageName].add("*");
+          }
+        }
+      }
+
+      // CommonJS require
+      if (node.type === "VariableDeclaration") {
+        for (const declaration of node.declarations) {
+          if (declaration.init?.type !== "CallExpression") {
+            continue;
+          }
+
+          if (declaration.init.callee.name !== "require") {
+            continue;
+          }
+
+          const packageName = declaration.init.arguments[0]?.value;
+
+          if (!packageName || !dependencies.has(packageName)) {
+            continue;
+          }
+
+          if (declaration.id.type === "ObjectPattern") {
+            for (const property of declaration.id.properties) {
+              if (property.type === "ObjectProperty") {
+                usage[packageName].add(property.key.name);
+              }
+            }
+          } else {
+            usage[packageName].add("default");
+          }
         }
       }
     }
-  }
-}
 
-console.log("Snooply found usage:\n");
-
-for (const [dependency, used] of Object.entries(usage)) {
-  if (used.size === 0) {
-    console.log(`• ${dependency}: not detected`);
-  } else {
-    console.log(`• ${dependency}: ${[...used].join(", ")}`);
+    // Yield periodically so the status animation actually gets a chance
+    // to redraw while a big project is still being scanned.
+    if (i % 15 === 0) {
+      await sleep(0);
+    }
   }
+
+  return usage;
 }
 
 // --- Recommendation engine ---
@@ -275,51 +280,117 @@ function capitalize(text) {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
-const recommendations = [];
-const unused = [];
+function buildResults(usage, devDependencyNames) {
+  const recommendations = [];
+  const unused = [];
 
-for (const [dependency, used] of Object.entries(usage)) {
-  const result = classifyDependency(
-    dependency,
-    used,
-    devDependencyNames.has(dependency)
+  for (const [dependency, used] of Object.entries(usage)) {
+    const result = classifyDependency(
+      dependency,
+      used,
+      devDependencyNames.has(dependency)
+    );
+
+    if (result.status === "WORTH_LOOKING_AT") {
+      const suggestion = getSuggestion(dependency, result.used);
+
+      recommendations.push({
+        dependency,
+        used: result.used,
+        reason: result.reason,
+        suggestion,
+        hasAlternative: suggestion !== null,
+      });
+    } else if (result.status === "UNUSED") {
+      unused.push({
+        dependency,
+        used: [],
+        reason: result.reason,
+        suggestion: null,
+        hasAlternative: false,
+      });
+    }
+  }
+
+  return { recommendations, unused };
+}
+
+async function main() {
+  const projectPath = process.cwd();
+  const packageJsonPath = path.join(projectPath, "package.json");
+
+  if (!fs.existsSync(packageJsonPath)) {
+    console.log("🐾 Snooply couldn't find a package.json here.");
+    process.exitCode = 1;
+    return;
+  }
+
+  let packageJson;
+  try {
+    packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8"));
+  } catch (error) {
+    console.log("🐾 Snooply found a package.json here, but couldn't read it (invalid JSON).");
+    process.exitCode = 1;
+    return;
+  }
+
+  const stopStatusAnimation = startStatusAnimation(STATUS_MESSAGES);
+
+  const devDependencyNames = new Set(
+    Object.keys(packageJson.devDependencies || {})
   );
 
-  if (result.status === "WORTH_LOOKING_AT") {
-    const suggestion = getSuggestion(dependency, result.used);
+  const dependencies = new Set([
+    ...Object.keys(packageJson.dependencies || {}),
+    ...devDependencyNames,
+  ]);
 
-    recommendations.push({
-      dependency,
-      used: result.used,
-      reason: result.reason,
-      suggestion,
-      hasAlternative: suggestion !== null,
-    });
-  } else if (result.status === "UNUSED") {
-    unused.push({
-      dependency,
-      used: [],
-      reason: result.reason,
-      suggestion: null,
-      hasAlternative: false,
-    });
+  const usage = await analyzeUsage(projectPath, dependencies);
+  const { recommendations, unused } = buildResults(usage, devDependencyNames);
+
+  stopStatusAnimation();
+
+  console.log("Snooply found your dependencies:\n");
+
+  for (const dependency of dependencies) {
+    console.log(`• ${dependency}`);
+  }
+
+  console.log("\nSnooply is checking your source files...\n");
+
+  console.log("Snooply found usage:\n");
+
+  for (const [dependency, used] of Object.entries(usage)) {
+    if (used.size === 0) {
+      console.log(`• ${dependency}: not detected`);
+    } else {
+      console.log(`• ${dependency}: ${[...used].join(", ")}`);
+    }
+  }
+
+  console.log("\n" + "=".repeat(40) + "\n");
+
+  if (recommendations.length === 0 && unused.length === 0) {
+    console.log("🐾 Snooply took a little look...");
+    console.log("Everything looks pretty reasonable! ♡");
+  } else {
+    // Part 5 will replace these detail blocks with the popup — kept for
+    // now so the recommendation output isn't lost in the meantime.
+    console.log("🐾 Snooply found something!\n");
+
+    for (const { reason, suggestion } of recommendations) {
+      console.log(reason);
+      console.log(`💡 ${suggestion || "You might not need the whole package."}\n`);
+    }
+
+    for (const { reason } of unused) {
+      console.log(reason);
+      console.log("💡 You might not need this dependency at all.\n");
+    }
   }
 }
 
-console.log("\n" + "=".repeat(40) + "\n");
-
-if (recommendations.length === 0 && unused.length === 0) {
-  console.log("🐾 Snooply looked around and everything checks out!\n");
-} else {
-  for (const { reason, suggestion } of recommendations) {
-    console.log("🐾 Snooply found something!\n");
-    console.log(reason + "\n");
-    console.log(`💡 ${suggestion || "You might not need the whole package."}\n`);
-  }
-
-  for (const { reason } of unused) {
-    console.log("🐾 Snooply found something!\n");
-    console.log(reason + "\n");
-    console.log("💡 You might not need this dependency at all.\n");
-  }
-}
+main().catch(() => {
+  console.log("🐾 Snooply hit a snag and had to stop.");
+  process.exitCode = 1;
+});
