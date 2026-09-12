@@ -2,7 +2,7 @@
   "name": "snooply",
   "version": "1.0.0",
   "description": "A tiny developer companion that snoops around your dependencies.",
-  "main": "index.js",
+  "main": "src/index.js",
   "bin": {
     "snooply": "./src/index.js"
   },

@@ -386,13 +386,9 @@ function chooseFromList(items, prompt) {
 }
 
 function fallbackSuggestionFor(item) {
-  if (item.suggestion) {
-    return item.suggestion;
-  }
-
-  return item.used.length > 0
-    ? "You might not need the whole package."
-    : "You might not need this dependency at all.";
+  // Recommendations always carry a suggestion by this point (see
+  // buildResults); only unused dependencies ever fall through to this.
+  return item.suggestion || "You might not need this dependency at all.";
 }
 
 function buildExploreText(item) {

@@ -1,30 +1,63 @@
 # 🐾 Snooply
 
-Snooply snoops around your project and tells you when a dependency might be more than you actually need — no dashboards, no percentages, just a straight-up heads-up.
+"Snoop through your dependencies."
+
+## The problem
+
+Developers often install large packages but end up using only a tiny part of them — a whole date library for one `format()` call, a whole utility library for `debounce`. Snooply looks through your project and finds dependencies that may deserve a second look, based on how you're actually using them — not guesses, not percentages.
+
+## Usage
+
+```bash
+snooply
+```
+
+Run it from the root of any JS project (once linked/installed — see below).
+
+## How it works
+
+```
+Project
+  ↓
+Dependencies (from package.json)
+  ↓
+Actual usage (scanned from your .js/.jsx files)
+  ↓
+Recommendation (only when there's real evidence)
+```
+
+Snooply scans your source files with `@babel/parser`, detects both ES `import` and CommonJS `require()`, and figures out exactly which named functions you use from each dependency. A package only gets flagged when the evidence supports it — heavily-used, core dependencies are left alone.
+
+### Example
+
+If your code only does this:
+
+```js
+import { debounce } from "lodash";
+```
+
+Snooply notices you're pulling in all of lodash for one function:
 
 ```
 🐾 Snooply found something!
 
 You're using only `debounce` from `lodash`.
 
-💡 You might not need the whole package.
+💡 You're only using `debounce`.
+
+Try `just-debounce-it` instead.
 ```
 
-## What it does
+When Snooply doesn't know a reliable, lightweight alternative, it still flags the limited usage — it just won't invent a package name to recommend:
 
-- Finds your `package.json` and reads its dependencies
-- Scans your `.js`/`.jsx` files (ES imports + CommonJS `require`)
-- Figures out exactly which functions you use from each package
-- Flags dependencies worth a second look — and stays quiet about the ones that are fine
-
-## Usage
-
-```bash
-node src/index.js
+```
+💡 This dependency might be worth a look.
 ```
 
-Run it from the root of any JS project.
+Unused dependencies are called out too, separately, since they might not be needed at all.
 
 ## Status
 
-Early days — this is an evolving CLI, not a finished product yet. More coming soon.
+This is the MVP core: dependency discovery, usage analysis, the recommendation engine, curated suggestions, and a small native popup for the result. It currently works on JavaScript projects (`.js`/`.jsx`, ES modules and CommonJS). Support for other languages or frameworks isn't implemented yet.
+
+A proper UI (replacing the current native popup) is planned next.
