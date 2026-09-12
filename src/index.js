@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const readline = require("readline");
+const { execSync } = require("child_process");
 const parser = require("@babel/parser");
 
 // --- Status animation ---
@@ -238,11 +240,13 @@ function formatList(names) {
 // engine above. It only speaks up when we have a confident, curated
 // alternative for EVERY named function actually used — if even one used
 // function has no known alternative, it stays quiet rather than guessing.
+// When it does speak up, it names the actual package — never a vague
+// "you might not need this" with nothing concrete behind it.
 
 const KNOWN_ALTERNATIVES = {
   lodash: {
-    debounce: "a small debounce utility",
-    throttle: "a small throttle utility",
+    debounce: "just-debounce-it",
+    throttle: "just-throttle",
   },
 };
 
@@ -253,19 +257,29 @@ function getSuggestion(dependency, namedUsage) {
     return null;
   }
 
-  const alternatives = [];
+  const packages = [];
 
   for (const fn of namedUsage) {
     if (!known[fn]) {
       return null;
     }
 
-    if (!alternatives.includes(known[fn])) {
-      alternatives.push(known[fn]);
+    if (!packages.includes(known[fn])) {
+      packages.push(known[fn]);
     }
   }
 
-  return `${capitalize(joinWithAnd(alternatives))} may work here instead of the whole package.`;
+  const text = [
+    `You're only using ${formatBacktickList(namedUsage)}.`,
+    "",
+    `Try ${formatBacktickList(packages)} instead.`,
+  ].join("\n");
+
+  return { text, packages };
+}
+
+function formatBacktickList(items) {
+  return joinWithAnd(items.map((item) => `\`${item}\``));
 }
 
 function joinWithAnd(items) {
@@ -274,10 +288,6 @@ function joinWithAnd(items) {
   }
 
   return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
-}
-
-function capitalize(text) {
-  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 function buildResults(usage, devDependencyNames) {
@@ -298,7 +308,10 @@ function buildResults(usage, devDependencyNames) {
         dependency,
         used: result.used,
         reason: result.reason,
-        suggestion,
+        // Evidence-based even without a known alternative — never a made-up
+        // package name just to have something to say.
+        suggestion: suggestion ? suggestion.text : "This dependency might be worth a look.",
+        suggestedPackages: suggestion ? suggestion.packages : [],
         hasAlternative: suggestion !== null,
       });
     } else if (result.status === "UNUSED") {
@@ -307,12 +320,216 @@ function buildResults(usage, devDependencyNames) {
         used: [],
         reason: result.reason,
         suggestion: null,
+        suggestedPackages: [],
         hasAlternative: false,
       });
     }
   }
 
   return { recommendations, unused };
+}
+
+// --- Popup UI ---
+//
+// Displays the structured data already produced by the recommendation and
+// suggestion engines above — it never recomputes a verdict or a suggestion
+// itself. Implemented as native macOS dialogs (via osascript) so there's no
+// UI framework, browser, or extra dependency involved. Each "screen" is one
+// small, disposable AppleScript process; nothing lingers after it closes.
+
+function escapeAppleScript(text) {
+  return String(text).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function runAppleScript(script) {
+  const tmpFile = path.join(os.tmpdir(), `snooply-popup-${Date.now()}.applescript`);
+  fs.writeFileSync(tmpFile, script, "utf-8");
+
+  try {
+    return execSync(`osascript "${tmpFile}"`, { stdio: ["ignore", "pipe", "ignore"] })
+      .toString()
+      .trim();
+  } finally {
+    fs.unlinkSync(tmpFile);
+  }
+}
+
+function showDialog(text, buttons, defaultButton) {
+  const buttonList = buttons.map((b) => `"${escapeAppleScript(b)}"`).join(", ");
+  const script = [
+    `set dialogResult to display dialog "${escapeAppleScript(text)}" with title "🐾 Snooply" buttons {${buttonList}} default button "${escapeAppleScript(defaultButton)}" with icon note`,
+    "button returned of dialogResult",
+  ].join("\n");
+
+  try {
+    return runAppleScript(script);
+  } catch (error) {
+    return null;
+  }
+}
+
+function chooseFromList(items, prompt) {
+  const itemList = items.map((i) => `"${escapeAppleScript(i)}"`).join(", ");
+  const script = [
+    `set chosen to choose from list {${itemList}} with title "🐾 Snooply" with prompt "${escapeAppleScript(prompt)}"`,
+    "if chosen is false then",
+    '  return "CANCELLED"',
+    "end if",
+    "item 1 of chosen",
+  ].join("\n");
+
+  try {
+    return runAppleScript(script);
+  } catch (error) {
+    return null;
+  }
+}
+
+function fallbackSuggestionFor(item) {
+  if (item.suggestion) {
+    return item.suggestion;
+  }
+
+  return item.used.length > 0
+    ? "You might not need the whole package."
+    : "You might not need this dependency at all.";
+}
+
+function buildExploreText(item) {
+  return [
+    "Dependency:",
+    item.dependency,
+    "",
+    "Used:",
+    item.used.length ? item.used.join(", ") : "none detected",
+    "",
+    "Reason:",
+    item.reason,
+    "",
+    "Suggestion:",
+    fallbackSuggestionFor(item),
+  ].join("\n");
+}
+
+function exploreItem(item) {
+  showDialog(buildExploreText(item), ["Close"], "Close");
+}
+
+function buildAllDependenciesText(dependencies, usage) {
+  const lines = [...dependencies].map((dependency) => {
+    const used = usage[dependency];
+    return used && used.size > 0
+      ? `• ${dependency}: ${[...used].join(", ")}`
+      : `• ${dependency}: not detected`;
+  });
+
+  return ["All dependencies:", "", ...lines].join("\n");
+}
+
+function showAllDependencies(dependencies, usage) {
+  showDialog(buildAllDependenciesText(dependencies, usage), ["Close"], "Close");
+}
+
+function showSingleRecommendationPopup(item, dependencies, usage) {
+  const text = [
+    "🐾",
+    "",
+    "Snooply found something!",
+    "",
+    item.reason,
+    "",
+    `💡 ${fallbackSuggestionFor(item)}`,
+  ].join("\n");
+
+  const button = showDialog(text, ["Close", "See all dependencies", "Explore"], "Explore");
+
+  if (button === "Explore") {
+    exploreItem(item);
+  } else if (button === "See all dependencies") {
+    showAllDependencies(dependencies, usage);
+  }
+}
+
+function showMultipleRecommendationsPopup(items, dependencies, usage) {
+  const sections = items.map((item) => {
+    const usedBlock = item.used.length
+      ? ["You're only using:", ...item.used.map((fn) => `✓ ${fn}`)].join("\n")
+      : item.reason;
+
+    return [item.dependency, "", usedBlock, "", `💡 ${fallbackSuggestionFor(item)}`].join("\n");
+  });
+
+  const text = [
+    `🐾 Snooply found ${items.length} things!`,
+    "",
+    "I think these are worth a look 👀",
+    "",
+    sections.join("\n\n━━━━━━━━━━━━━━━━━━\n\n"),
+  ].join("\n");
+
+  const button = showDialog(text, ["Close", "See all dependencies", "Explore"], "Explore");
+
+  if (button === "Explore") {
+    const names = items.map((item) => item.dependency);
+    const chosen = chooseFromList(names, "Which dependency would you like to explore?");
+    const chosenItem = items.find((item) => item.dependency === chosen);
+
+    if (chosenItem) {
+      exploreItem(chosenItem);
+    }
+  } else if (button === "See all dependencies") {
+    showAllDependencies(dependencies, usage);
+  }
+}
+
+function showNoRecommendationsPopup(dependencies, usage) {
+  const text = [
+    "🐾",
+    "",
+    "Snooply took a little look…",
+    "",
+    "Everything looks pretty reasonable! ♡",
+    "",
+    "Nothing worth bothering you about right now.",
+  ].join("\n");
+
+  const button = showDialog(text, ["Close", "See all dependencies"], "Close");
+
+  if (button === "See all dependencies") {
+    showAllDependencies(dependencies, usage);
+  }
+}
+
+function isPopupSupported() {
+  if (process.platform !== "darwin") {
+    return false;
+  }
+
+  try {
+    execSync("which osascript", { stdio: "ignore" });
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function showPopup(flaggedItems, dependencies, usage) {
+  if (!isPopupSupported()) {
+    console.log("(Popup isn't available on this platform yet — terminal output above is it for now.)");
+    return;
+  }
+
+  try {
+    if (flaggedItems.length === 0) {
+      showNoRecommendationsPopup(dependencies, usage);
+    } else if (flaggedItems.length === 1) {
+      showSingleRecommendationPopup(flaggedItems[0], dependencies, usage);
+    } else {
+      showMultipleRecommendationsPopup(flaggedItems, dependencies, usage);
+    }
+  } catch (error) {
+    // Popup dismissed or unavailable mid-flow — never crash the CLI over it.
+  }
 }
 
 async function main() {
@@ -370,24 +587,18 @@ async function main() {
 
   console.log("\n" + "=".repeat(40) + "\n");
 
-  if (recommendations.length === 0 && unused.length === 0) {
+  const flaggedItems = [...recommendations, ...unused];
+
+  if (flaggedItems.length === 0) {
     console.log("🐾 Snooply took a little look...");
     console.log("Everything looks pretty reasonable! ♡");
+  } else if (flaggedItems.length === 1) {
+    console.log("🐾 Snooply found something!");
   } else {
-    // Part 5 will replace these detail blocks with the popup — kept for
-    // now so the recommendation output isn't lost in the meantime.
-    console.log("🐾 Snooply found something!\n");
-
-    for (const { reason, suggestion } of recommendations) {
-      console.log(reason);
-      console.log(`💡 ${suggestion || "You might not need the whole package."}\n`);
-    }
-
-    for (const { reason } of unused) {
-      console.log(reason);
-      console.log("💡 You might not need this dependency at all.\n");
-    }
+    console.log(`🐾 Snooply found ${flaggedItems.length} things!`);
   }
+
+  showPopup(flaggedItems, dependencies, usage);
 }
 
 main().catch(() => {
