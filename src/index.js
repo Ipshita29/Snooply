@@ -6,12 +6,11 @@ const readline = require("readline");
 const http = require("http");
 const { spawn } = require("child_process");
 const parser = require("@babel/parser");
+const { analyzeReachability } = require("./graph");
 
-// --- Status animation ---
-//
-// One updating line instead of a permanent scroll of messages. No fake
-// percentages — just qualitative "Snooply is working" flavor text that
-// rotates while real work happens.
+// --- Loading animation ---
+// Rotates a single line of status text while Snooply works.
+// No fake percentages, just a sign that something's happening.
 
 const STATUS_MESSAGES = [
   "🐾 Snooply is snooping around your project...",
@@ -54,11 +53,10 @@ const IGNORED_DIRECTORIES = new Set([
   ".cache",
 ]);
 
-// `excludedDirs` holds the absolute paths of OTHER workspaces nested inside
-// this one (see findWorkspaceRoots below) — a workspace scans its own tree
-// but never descends into a sibling/nested package, which is scanned
-// separately as its own workspace. Empty for a plain single-package project,
-// so existing behavior is unaffected.
+// --- Project scanning ---
+
+// Find source files in a folder
+// (excludedDirs skips other workspaces nested inside this one)
 function getJavaScriptFiles(directory, excludedDirs = new Set()) {
   const files = [];
 
@@ -100,12 +98,8 @@ function getJavaScriptFiles(directory, excludedDirs = new Set()) {
   return files;
 }
 
-// Recursively finds every directory containing its own package.json, from
-// startDir downward, skipping the same generated/dependency directories the
-// analyzer already ignores. This is deliberately just "find package.json
-// boundaries" rather than parsing a "workspaces" field or glob patterns —
-// it naturally covers plain workspaces config, apps/*, packages/*, and any
-// other layout, without needing to know about any of them specifically.
+// Find every package.json in the project
+// (covers single packages, apps/*, packages/*, or any other layout)
 function findWorkspaceRoots(startDir) {
   const roots = [];
 
@@ -133,22 +127,18 @@ function findWorkspaceRoots(startDir) {
   return roots;
 }
 
-// A short, human-readable label for a workspace — the path relative to the
-// project root (e.g. "client", "apps/web"), or "root" for the top-level
-// package itself. Only ever shown when more than one workspace exists.
+// Short label for a workspace, like "client" or "apps/web"
 function getWorkspaceLabel(root, projectPath) {
   const relative = path.relative(projectPath, root);
   return relative === "" ? "root" : relative.split(path.sep).join("/");
 }
 
-// Evidence markers that mean "this dependency is genuinely bound/used
-// somewhere" but don't name a specific export — never counted as one of the
-// "few specific functions" the recommendation engine looks for.
+// Markers for "used, but no specific function name"
 const NON_SPECIFIC_MARKERS = new Set(["default", "*", "JSX"]);
 
-// Generic recursive walk over any Babel AST node — visits every node once.
-// Deliberately untyped/shape-agnostic so it doesn't need updating whenever
-// a new node type (JSX, dynamic import, etc.) shows up in real code.
+// --- Dependency analyzer ---
+
+// Walk every node in the AST
 function walkAst(node, visit) {
   if (!node || typeof node.type !== "string") {
     return;
@@ -175,18 +165,12 @@ function walkAst(node, visit) {
   }
 }
 
-// Explicit, curated globals for packages that are commonly loaded outside
-// of any module system (a plain <script> tag / UMD build) rather than
-// imported — e.g. Snooply's own popup UI loads React off a <script> tag and
-// never writes `import React from "react"` anywhere. Deliberately NOT a
-// heuristic like "capitalized identifier = dependency" — only these exact,
-// documented global names for these exact packages ever count as evidence.
+// Known globals for packages loaded via <script> tags
+// (e.g. Snooply's own UI uses window.React, no import statement)
 const GLOBAL_PACKAGE_BINDINGS = {
   react: ["React"],
   "react-dom": ["ReactDOM"],
-  // react-router-dom's own UMD build publishes this as its global name —
-  // not used anywhere in Snooply's own source, but included so the same
-  // conservative mechanism works for projects that do load it this way.
+  // react-router-dom's UMD build uses this name
   "react-router-dom": ["ReactRouterDOM"],
 };
 
@@ -197,9 +181,8 @@ for (const [pkg, globalNames] of Object.entries(GLOBAL_PACKAGE_BINDINGS)) {
   }
 }
 
-// Resolves an import/require source string to a tracked dependency name,
-// understanding subpath imports like "react-dom/client" or "@scope/pkg/sub"
-// — without this, those are invisible to a plain exact-string match.
+// Match an import path to a known package
+// (handles subpaths like "react-dom/client" or "@scope/pkg/sub")
 function resolveTrackedPackage(source, dependencies) {
   if (typeof source !== "string") {
     return null;
@@ -226,28 +209,44 @@ function isDynamicImportCall(node) {
   return node?.type === "CallExpression" && node.callee.type === "Import";
 }
 
+// Parse a file and find package + local imports
 function analyzeFile(code, dependencies, usage) {
   const ast = parser.parse(code, {
     sourceType: "unambiguous",
     plugins: ["jsx"],
   });
 
-  // Pass 1: collect every import/require/dynamic-import binding in the
-  // file, recording baseline evidence and remembering which local
-  // identifier maps to which dependency (so pass 2 can attribute member
-  // access like `axios.get(...)` or `_.debounce(...)`).
+  // Track which local name maps to which package
+  // (e.g. `debounce` -> lodash, so `debounce()` counts as usage)
   const bindings = new Map();
+  // Local file imports, for the reachability graph
+  const localImportSpecifiers = [];
 
+  // Find imports and requires
   walkAst(ast.program, (node) => {
+    if (isRequireCall(node) || isDynamicImportCall(node)) {
+      const arg = node.arguments[0];
+      if (arg?.type === "StringLiteral" && (arg.value.startsWith("./") || arg.value.startsWith("../"))) {
+        localImportSpecifiers.push(arg.value);
+      }
+      // No return here - the require() case below still needs this node
+    }
+
     if (node.type === "ImportDeclaration") {
-      const pkg = resolveTrackedPackage(node.source.value, dependencies);
+      const source = node.source.value;
+
+      if (source.startsWith("./") || source.startsWith("../")) {
+        localImportSpecifiers.push(source);
+        return;
+      }
+
+      const pkg = resolveTrackedPackage(source, dependencies);
       if (!pkg) {
         return;
       }
 
       if (node.specifiers.length === 0) {
-        // Side-effect-only import, e.g. `import "some-polyfill";` — it's
-        // real usage, we just can't attribute it to a named export.
+        // Side-effect import, e.g. `import "some-polyfill"`
         usage[pkg].add("default");
       }
 
@@ -297,19 +296,14 @@ function analyzeFile(code, dependencies, usage) {
     }
   });
 
-  // Resolves the "object" side of a member expression to a tracked package,
-  // one level deep — covers both plain bindings (`axios.get()`) and calling
-  // a default export as a factory before chaining (`moment().format()`,
-  // a very common pattern for date/query-builder style libraries).
+  // Match `axios.get()` or `moment().format()` back to a package
   function resolveCallTargetPackage(expr) {
     if (expr.type === "Identifier") {
       if (bindings.has(expr.name)) {
         return bindings.get(expr.name).pkg;
       }
 
-      // No local import/require binding shadows this name — fall back to
-      // an explicit known global (e.g. `React` from a <script> tag), but
-      // only when that package is actually declared as a dependency.
+      // Not a local binding - check known globals instead
       const globalPkg = GLOBAL_NAME_TO_PACKAGE.get(expr.name);
       return globalPkg && dependencies.has(globalPkg) ? globalPkg : null;
     }
@@ -326,14 +320,8 @@ function analyzeFile(code, dependencies, usage) {
     return null;
   }
 
-  // Pass 2: look for evidence of *what's actually used* — member access on
-  // a known binding or global (`React.createElement`, `_.debounce`,
-  // `axios.get`), the same pattern chained inline off a require()/import()
-  // with no intermediate variable, calling a default export before
-  // chaining (`moment().format()`), and JSX itself as evidence of React
-  // usage. Deliberately matches MemberExpression itself, not just ones
-  // used as a call's callee — `const h = React.createElement;` is real
-  // evidence even though `createElement` is never actually invoked there.
+  // Find package usage
+  // (member access like `React.createElement`, plus JSX as React usage)
   walkAst(ast.program, (node) => {
     if (node.type === "MemberExpression" && !node.computed && node.property.type === "Identifier") {
       const pkg = resolveCallTargetPackage(node.object);
@@ -345,64 +333,75 @@ function analyzeFile(code, dependencies, usage) {
     }
 
     if ((node.type === "JSXElement" || node.type === "JSXFragment") && usage.react) {
-      // JSX is evidence of React usage even with no explicit `import React`
-      // (the modern automatic JSX runtime) — but it's not a specific named
-      // export, so it's tracked as its own honest marker, not invented API.
+      // JSX counts as React usage even without `import React`
       usage.react.add("JSX");
     }
   });
+
+  return { localImportSpecifiers };
 }
 
+// Scan all source files and collect usage
 async function analyzeUsage(projectPath, dependencies, excludedDirs = new Set()) {
   const files = getJavaScriptFiles(projectPath, excludedDirs);
   const usage = {};
+  // Which files use each dependency, and each file's local imports
+  // (this feeds the reachability graph)
+  const usageFiles = {};
+  const localImportsByFile = {};
 
   for (const dependency of dependencies) {
     usage[dependency] = new Set();
+    usageFiles[dependency] = new Set();
   }
 
   for (let i = 0; i < files.length; i++) {
-    const code = fs.readFileSync(files[i], "utf-8");
+    const filePath = files[i];
+    const code = fs.readFileSync(filePath, "utf-8");
 
+    const fileUsage = {};
+    for (const dependency of dependencies) {
+      fileUsage[dependency] = new Set();
+    }
+
+    let result;
     try {
-      analyzeFile(code, dependencies, usage);
+      result = analyzeFile(code, dependencies, fileUsage);
     } catch (error) {
-      // Unparsable file (syntax error, unsupported syntax) — skip it and
-      // keep going rather than losing the rest of the project's evidence.
+      // Skip files that fail to parse
       continue;
     }
 
-    // Yield periodically so the status animation actually gets a chance
-    // to redraw while a big project is still being scanned.
+    localImportsByFile[filePath] = result.localImportSpecifiers;
+
+    for (const dependency of dependencies) {
+      for (const evidence of fileUsage[dependency]) {
+        usage[dependency].add(evidence);
+      }
+      if (fileUsage[dependency].size > 0) {
+        usageFiles[dependency].add(filePath);
+      }
+    }
+
+    // Let the loading animation redraw on big projects
     if (i % 15 === 0) {
       await sleep(0);
     }
   }
 
-  return usage;
+  return { usage, usageFiles, files, localImportsByFile };
 }
 
 // --- Recommendation engine ---
 //
-// Snooply produces exactly two kinds of finding, both meant to be
-// immediately actionable — everything else is silently NO_FINDING:
-//
-//   UNUSED             the dependency has zero detected source usage
-//   KNOWN_ALTERNATIVE  usage is narrow AND a concrete, curated alternative
-//                      is known for exactly that usage
-//
-// There is deliberately no "few functions used" heuristic on its own.
-// Calling one or two APIs out of a library that exposes hundreds is normal,
-// not suspicious — it's evidence about *how* something is used, never
-// evidence that it's unnecessary. A recommendation only exists when Snooply
-// can answer all three of: what did it find, why does it matter, what can
-// the developer actually do about it.
+// Only two kinds of finding: UNUSED (no usage found) and
+// KNOWN_ALTERNATIVE (narrow usage + a known smaller replacement).
+// Using a couple of functions from a big library is normal, not
+// suspicious, so that alone is never a reason to flag something.
 
 const FEW_FUNCTIONS_LIMIT = 2;
 
-// Packages whose architectural role can't be judged by API count — a
-// framework/build-tool dependency is never flagged just because only a
-// couple of its APIs turned up in a scan.
+// Frameworks aren't flagged just for light usage
 const FRAMEWORK_PACKAGES = new Set([
   "react",
   "react-dom",
@@ -445,26 +444,19 @@ function joinWithAnd(items) {
   return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
 }
 
-// --- Curated alternative knowledge base ---
-//
-// Deliberately tiny and explicit. If a dependency/usage pattern isn't
-// listed here, there is no recommendation — Snooply never invents one.
-
-// Per-function: "if the entire narrow usage is covered by this map, here's
-// a smaller single-purpose replacement for exactly that."
+// --- Known alternatives ---
+// Small and explicit on purpose. No match here means no
+// recommendation - Snooply never makes one up.
 const FUNCTION_ALTERNATIVES = {
   lodash: {
     debounce: "just-debounce-it",
     throttle: "just-throttle",
   },
 };
+// No moment -> date-fns entry yet: the APIs are too
+// different for that to be a safe drop-in suggestion
 
-// Whole-package migrations (e.g. moment → date-fns) are intentionally left
-// out of the MVP knowledge base for now — the API shapes are different
-// enough (chainable/mutable vs. functional/immutable) that "replace X with
-// Y" risks overstating how simple the swap actually is. Only add one back
-// once there's a specific, defensible case for it.
-
+// Find a known smaller alternative
 function findKnownAlternative(dependency, namedUsage) {
   const known = FUNCTION_ALTERNATIVES[dependency];
   if (!known || namedUsage.length === 0) {
@@ -484,12 +476,13 @@ function findKnownAlternative(dependency, namedUsage) {
   return { packages };
 }
 
+// Decide if a dependency is worth flagging
 function evaluateDependency(name, used, isDevDependency) {
   const namedUsage = [...used].filter((marker) => !NON_SPECIFIC_MARKERS.has(marker));
 
   if (used.size === 0) {
     if (isDevDependency) {
-      // Normal for build/lint/test tooling — not worth surfacing.
+      // Normal for build/lint/test tooling
       return { status: "NO_FINDING" };
     }
 
@@ -505,29 +498,23 @@ function evaluateDependency(name, used, isDevDependency) {
   }
 
   if (namedUsage.length === 0) {
-    // Only whole-module evidence (default/namespace import, or JSX with no
-    // specific attribution) — too thin to say anything concrete, so Snooply
-    // stays quiet rather than guessing.
+    // Just a default/namespace import, too vague to say anything useful
     return { status: "NO_FINDING" };
   }
 
   if (namedUsage.length > FEW_FUNCTIONS_LIMIT) {
-    // Broad, varied usage of a broad library — using many of its
-    // capabilities is exactly what it's there for.
+    // Using lots of the library is normal, not a red flag
     return { status: "NO_FINDING" };
   }
 
   if (isDevDependency) {
-    // The "smaller runtime footprint" motivation behind these alternatives
-    // doesn't apply to devDependencies — they aren't shipped, so there's
-    // nothing concrete to recommend even with narrow usage.
+    // Bundle size doesn't matter for devDependencies
     return { status: "NO_FINDING" };
   }
 
   const alternative = findKnownAlternative(name, namedUsage);
   if (!alternative) {
-    // Narrow usage alone is never a recommendation on its own — only flag
-    // it when there's a concrete, curated alternative to point at.
+    // Light usage alone isn't a recommendation without a real alternative
     return { status: "NO_FINDING" };
   }
 
@@ -540,9 +527,7 @@ function evaluateDependency(name, used, isDevDependency) {
   };
 }
 
-// Turns a raw usage Set (which may contain internal markers like "default"
-// or "JSX" alongside real export names) into what the CLI should actually
-// print — never the raw sentinels themselves.
+// Turn raw usage into readable text for the CLI
 function formatUsageForDisplay(used) {
   const named = [...used].filter((name) => !NON_SPECIFIC_MARKERS.has(name));
   const labels = [...named];
@@ -558,6 +543,7 @@ function formatUsageForDisplay(used) {
   return labels.length > 0 ? labels.join(", ") : null;
 }
 
+// Create dependency recommendations
 function buildResults(usage, devDependencyNames) {
   const recommendations = [];
   const unused = [];
@@ -589,15 +575,11 @@ function buildResults(usage, devDependencyNames) {
   return { recommendations, unused };
 }
 
-// --- Popup UI ---
+// --- Popup server ---
 //
-// A small React app renders the structured data already produced by the
-// recommendation and suggestion engines above — it never recomputes a
-// verdict or a suggestion itself, it only displays what it's given. It's
-// served from a tiny local HTTP server (Node's built-in `http`, no
-// framework) and opened as a compact app-style window. The server shuts
-// itself down as soon as the page is closed, so nothing lingers in the
-// background — see the heartbeat/close handling below.
+// Serves the React UI over a local HTTP server and opens it in the
+// Snooply window. The UI just displays this data, it doesn't recompute
+// anything. Server shuts down once the popup is closed.
 
 const UI_DIR = path.join(__dirname, "ui");
 const NODE_MODULES_DIR = path.join(__dirname, "..", "node_modules");
@@ -606,9 +588,8 @@ function readUiFile(...segments) {
   return fs.readFileSync(path.join(...segments), "utf-8");
 }
 
-// The page itself is just this shell — all real markup comes from React
-// (app.jsx) and all styling from app.css, so there's no separate HTML file
-// to keep in sync.
+// Build the popup's HTML page
+// (real content comes from app.jsx and app.css, this is just the shell)
 function buildHtmlDocument(payload) {
   const dataJson = JSON.stringify(payload).replace(/</g, "\\u003c");
 
@@ -630,20 +611,20 @@ function buildHtmlDocument(payload) {
 </html>`;
 }
 
+// Find the electron binary, if installed
 function resolveElectronBinary() {
   try {
-    // Required from a plain Node process (not from inside Electron itself),
-    // the `electron` package's main export is the path to its binary.
     const electronPath = require("electron");
     if (typeof electronPath === "string" && fs.existsSync(electronPath)) {
       return electronPath;
     }
   } catch (error) {
-    // Not installed / failed to resolve — fall back below.
+    // Not installed - fall back below
   }
   return null;
 }
 
+// Fallback: open the popup as a browser tab instead
 function openPopupWindowInBrowser(url) {
   if (process.platform === "darwin") {
     const appModeCandidates = [
@@ -675,20 +656,17 @@ function openPopupWindowInBrowser(url) {
   spawn("xdg-open", [url], { stdio: "ignore", detached: true }).unref();
 }
 
+// Show the Snooply window
 function openPopupWindow(url) {
   const electronBinary = resolveElectronBinary();
 
   if (electronBinary) {
-    // A real transparent, frameless, always-on-top overlay window — this is
-    // what makes it feel like a notification over the editor rather than a
-    // separate application. If the parent shell has ELECTRON_RUN_AS_NODE set
-    // (common when Snooply itself is launched from inside an Electron-based
-    // tool, e.g. a VS Code terminal), it leaks into this child and forces
-    // Electron to run as plain Node instead of a real app — strip it.
+    // Strip ELECTRON_RUN_AS_NODE - it can leak in from a parent
+    // Electron process (like a VS Code terminal) and break the launch
     const env = { ...process.env };
     delete env.ELECTRON_RUN_AS_NODE;
 
-    spawn(electronBinary, [path.join(__dirname, "electron-main.js"), url], {
+    spawn(electronBinary, [path.join(__dirname, "window.js"), url], {
       stdio: "ignore",
       detached: true,
       env,
@@ -696,11 +674,11 @@ function openPopupWindow(url) {
     return;
   }
 
-  // Electron unavailable for some reason — degrade to a plain app-style
-  // browser window rather than failing outright.
+  // No Electron - fall back to a browser tab
   openPopupWindowInBrowser(url);
 }
 
+// Start the local server and open the popup
 function showReactPopup(flaggedItems, dependencies, usage) {
   return new Promise((resolve) => {
     const payload = {
@@ -765,15 +743,14 @@ function showReactPopup(flaggedItems, dependencies, usage) {
       }
     });
 
-    // Once the page has loaded and started pinging, a missed heartbeat means
-    // the window was closed (directly, not via our Close button) — shut down.
+    // A missed heartbeat means the window was closed
     const heartbeatCheck = setInterval(() => {
       if (firstPingReceived && Date.now() - lastPingAt > 5000) {
         finish();
       }
     }, 1000);
 
-    // Safety net in case the window never opens/loads at all.
+    // In case the window never opens at all
     const launchTimeout = setTimeout(() => {
       if (!firstPingReceived) {
         finish();
@@ -789,10 +766,12 @@ function showReactPopup(flaggedItems, dependencies, usage) {
   });
 }
 
+// --- CLI entry point ---
 async function main() {
   const projectPath = process.cwd();
   const verbose = process.argv.includes("--verbose");
 
+  // Find project files
   const workspaceRoots = findWorkspaceRoots(projectPath);
 
   if (workspaceRoots.length === 0) {
@@ -801,9 +780,7 @@ async function main() {
     return;
   }
 
-  // A plain single-package project (the common case, and everything Snooply
-  // supported before this) must keep behaving exactly as it did — including
-  // this exact error message when that one package.json is malformed.
+  // Keep the single-package error message exactly as before
   if (workspaceRoots.length === 1) {
     try {
       JSON.parse(fs.readFileSync(path.join(workspaceRoots[0], "package.json"), "utf-8"));
@@ -819,12 +796,12 @@ async function main() {
   const workspaces = [];
 
   for (const root of workspaceRoots) {
+    // Read the package manifest
     let packageJson;
     try {
       packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf-8"));
     } catch (error) {
-      // Malformed package.json in one workspace of a multi-package project
-      // shouldn't take down the scan for every other workspace.
+      // Skip this workspace, don't stop the whole scan
       continue;
     }
 
@@ -834,23 +811,42 @@ async function main() {
       ...devDependencyNames,
     ]);
 
-    // Other discovered workspaces nested inside this one are scanned on
-    // their own — never as part of this package's source tree, so a
-    // dependency in one package can't get credited with usage that
-    // actually lives in another.
+    // Don't scan into other workspaces nested in this one
     const excludedDirs = new Set(
       workspaceRoots.filter((other) => other !== root && other.startsWith(root + path.sep))
     );
 
-    const usage = await analyzeUsage(root, dependencies, excludedDirs);
+    // Find package usage
+    const { usage, usageFiles, files, localImportsByFile } = await analyzeUsage(root, dependencies, excludedDirs);
     const { recommendations, unused } = buildResults(usage, devDependencyNames);
+
+    // Trace which usage is in reachable files
+    // (extra evidence only - doesn't change recommendations)
+    const reachability = analyzeReachability({ root, scannedFiles: files, localImportsByFile, packageJson });
+
+    const usageReachability = {};
+    for (const dependency of dependencies) {
+      const allUsageFiles = [...usageFiles[dependency]];
+      usageReachability[dependency] = {
+        usageFiles: allUsageFiles,
+        reachableUsageFiles: reachability.confident
+          ? allUsageFiles.filter((file) => reachability.reachableFiles.has(file))
+          : allUsageFiles,
+        unreachableUsageFiles: reachability.confident
+          ? allUsageFiles.filter((file) => !reachability.reachableFiles.has(file))
+          : [],
+      };
+    }
 
     workspaces.push({
       label: getWorkspaceLabel(root, projectPath),
+      root,
       dependencies,
       usage,
       recommendations,
       unused,
+      reachability,
+      usageReachability,
     });
   }
 
@@ -858,12 +854,8 @@ async function main() {
 
   const showWorkspaceLabels = workspaces.length > 1;
 
-  // The analyzer always computes full evidence per workspace (see
-  // analyzeUsage/buildResults above) — this is just the presentation choice
-  // for the normal `snooply` run. --verbose prints the same detailed
-  // breakdown the CLI always used to show, per workspace; without it, the
-  // terminal only gets the final, user-facing result and the React popup
-  // carries the detailed experience.
+  // Detailed breakdown, only shown with --verbose
+  // (normal output stays clean, the popup shows the details)
   if (verbose) {
     for (const ws of workspaces) {
       if (showWorkspaceLabels) {
@@ -881,6 +873,26 @@ async function main() {
       for (const [dependency, used] of Object.entries(ws.usage)) {
         const display = formatUsageForDisplay(used);
         console.log(`• ${dependency}: ${display || "not detected"}`);
+      }
+
+      if (ws.reachability.confident) {
+        const entryLabels = ws.reachability.entryPoints.map((file) => path.relative(ws.root, file));
+        console.log(`\nEntry point(s): ${entryLabels.join(", ")}`);
+        console.log(`Reachable files: ${ws.reachability.reachableFiles.size}`);
+
+        const unreachableOnly = Object.entries(ws.usageReachability).filter(
+          ([, info]) => info.usageFiles.length > 0 && info.reachableUsageFiles.length === 0
+        );
+
+        if (unreachableOnly.length > 0) {
+          console.log("\nUsed only by unreachable source files:");
+          for (const [dependency, info] of unreachableOnly) {
+            const fileLabels = info.unreachableUsageFiles.map((file) => path.relative(ws.root, file));
+            console.log(`• ${dependency}: ${fileLabels.join(", ")}`);
+          }
+        }
+      } else {
+        console.log("\nEntry point: not confidently detected — reachability analysis skipped.");
       }
 
       console.log("\n" + "=".repeat(40) + "\n");
@@ -917,11 +929,8 @@ async function main() {
     }
   }
 
-  // The popup UI (app.jsx, untouched) only understands one flat dependency
-  // list/usage map — when there's more than one workspace, dependency names
-  // are suffixed with their workspace so cards and the "see all
-  // dependencies" view can't collide or look cross-attributed, without
-  // requiring any change to the popup itself.
+  // Tag dependency names with their workspace so the popup
+  // (which only knows one flat list) can't mix them up
   const popupItems = showWorkspaceLabels
     ? flaggedItems.map((item) => ({ ...item, dependency: `${item.dependency} (${item.workspace})` }))
     : flaggedItems;
@@ -937,6 +946,7 @@ async function main() {
     }
   }
 
+  // Show the Snooply window
   await showReactPopup(popupItems, popupDependencies, popupUsage);
 }
 

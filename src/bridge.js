@@ -1,6 +1,5 @@
-// Minimal, explicit bridge between the overlay page and the Electron main
-// process — no Node integration exposed to the page itself, just the two
-// calls it actually needs (report its own height, ask to be closed).
+// Safe bridge between the popup page and Electron
+// The page can only call these three things, nothing else
 
 const { contextBridge, ipcRenderer } = require("electron");
 

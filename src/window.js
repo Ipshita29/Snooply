@@ -1,7 +1,6 @@
-// Electron main process for Snooply's overlay window. Spawned as a detached
-// child process by src/index.js (see openPopupWindow) — it owns nothing but
-// the window itself: all recommendation data still comes from the local
-// server the CLI started, loaded here exactly like a normal page.
+// Creates the Snooply popup window.
+// Spawned by index.js as a separate process — it just loads the local
+// server's page, it doesn't know anything about dependencies.
 
 const { app, BrowserWindow, screen, ipcMain } = require("electron");
 const path = require("path");
@@ -12,9 +11,7 @@ const WINDOW_WIDTH = 400;
 const INITIAL_HEIGHT = 220;
 const RIGHT_MARGIN = 28;
 
-// Keeps a bounds rect fully within whichever display it's currently on —
-// used both while dragging and after a resize, so the popup can never end
-// up (even partially) off-screen.
+// Keep the window on screen
 function clampToDisplay(bounds) {
   const display = screen.getDisplayMatching(bounds) || screen.getDisplayNearestPoint(bounds);
   const wa = display.workArea;
@@ -29,6 +26,7 @@ function clampToDisplay(bounds) {
   };
 }
 
+// Create the transparent popup window
 function createWindow() {
   const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workAreaSize;
 
@@ -47,7 +45,7 @@ function createWindow() {
     backgroundColor: "#00000000",
     show: false,
     webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
+      preload: path.join(__dirname, "bridge.js"),
       contextIsolation: true,
       nodeIntegration: false,
     },
@@ -57,9 +55,8 @@ function createWindow() {
   win.once("ready-to-show", () => win.show());
   win.loadURL(targetUrl);
 
-  // Only ever change height here, keeping the window's current top-left —
-  // otherwise every recommendation/view change would snap it back to the
-  // default right-center spot and undo whatever the user dragged it to.
+  // Resize without moving the window
+  // (keeps whatever position the user dragged it to)
   const resizeListener = (event, height) => {
     if (event.sender !== win.webContents) {
       return;
@@ -77,10 +74,8 @@ function createWindow() {
     win.close();
   };
 
-  // The page drives dragging itself (mousemove deltas over IPC) rather than
-  // native -webkit-app-region: drag, which was found to swallow clicks on
-  // buttons layered inside the draggable card. Each delta just nudges the
-  // window from its current position, clamped so it can't go off-screen.
+  // Move the window by a drag delta
+  // (native drag-region swallowed button clicks, so the page drives this)
   const moveListener = (event, dx, dy) => {
     if (event.sender !== win.webContents) {
       return;
@@ -101,6 +96,7 @@ function createWindow() {
   });
 }
 
+// Hide the dock icon and show the popup
 app.whenReady().then(() => {
   if (process.platform === "darwin" && app.dock) {
     app.dock.hide();
@@ -108,6 +104,7 @@ app.whenReady().then(() => {
   createWindow();
 });
 
+// Quit once the popup is closed
 app.on("window-all-closed", () => {
   app.quit();
 });

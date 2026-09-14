@@ -18,20 +18,18 @@
     }
   }
 
-  // Inside the Electron overlay, `window.snooply` is the preload bridge —
-  // use it so the window actually closes. Outside Electron (plain browser
-  // fallback), fall back to a best-effort window.close().
+  // Close the popup window
   function requestWindowClose() {
     if (window.snooply && typeof window.snooply.requestClose === "function") {
       window.snooply.requestClose();
       return;
     }
 
+    // Fallback for a plain browser tab (no Electron bridge)
     try {
       window.close();
     } catch (error) {
-      // Some browsers refuse to script-close a window they didn't open;
-      // the CLI has already exited via /close regardless.
+      // Browser may refuse this - the CLI has already exited anyway
     }
   }
 
@@ -43,11 +41,8 @@
     window.snooply.resize(height);
   }
 
-  // Drag is handled entirely here (mouse deltas over IPC) rather than via
-  // native -webkit-app-region: drag — that approach was found to swallow
-  // clicks on buttons nested inside the draggable area. Only starts a drag
-  // when the mousedown didn't originate on a button/link, so Close/Explore/
-  // See all dependencies/Back all keep working normally.
+  // Handle popup dragging
+  // (native drag-region swallowed button clicks, so we do it by hand)
   function isInteractiveTarget(target) {
     return !!(target && target.closest && target.closest("button, a"));
   }
@@ -95,13 +90,13 @@
     });
   }
 
-  // Renders `backtick` spans from the suggestion/reason text as inline code,
-  // matching what the suggestion engine already writes into the string.
+  // Turn `backtick` text into inline code
   function renderWithCode(text, keyPrefix) {
     const parts = String(text).split("`");
     return parts.map((part, i) => (i % 2 === 1 ? h("code", { key: keyPrefix + i }, part) : part));
   }
 
+  // Show the mascot
   function Mascot(props) {
     const size = (props && props.size) || 60;
     return h(
@@ -154,6 +149,7 @@
     return item.kind === "UNUSED" ? { text: "Unused", cls: "unused" } : { text: "Worth a look", cls: "look" };
   }
 
+  // Show one recommendation card
   function RecommendationCard(props) {
     const item = props.item;
     const badge = badgeFor(item);
@@ -194,6 +190,7 @@
     );
   }
 
+  // Show the full details for one dependency
   function ExploreView(props) {
     const item = props.item;
     const badge = badgeFor(item);
@@ -227,6 +224,7 @@
     );
   }
 
+  // Show every dependency and its usage
   function AllDependenciesView(props) {
     return h(
       "div",
@@ -249,6 +247,7 @@
     );
   }
 
+  // Show empty state (nothing found)
   function EmptyState(props) {
     return h(
       "div",
@@ -261,6 +260,7 @@
     );
   }
 
+  // Popup frame - background glow, card, drag handling
   function Shell(props) {
     return h(
       React.Fragment,
@@ -287,8 +287,7 @@
       startHeartbeat();
     }, []);
 
-    // Keep the overlay window snug around whatever's currently showing —
-    // a single recommendation, a longer list, or the detail/all-deps view.
+    // Resize the window to fit whatever view is showing
     React.useEffect(() => {
       if (!cardRef.current || typeof ResizeObserver === "undefined") {
         return;
@@ -322,6 +321,7 @@
       );
     }
 
+    // Pick which view to show
     let body;
 
     if (view === "explore" && selected) {
