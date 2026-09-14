@@ -184,7 +184,7 @@
         "p",
         { className: "suggestion" },
         h("span", null, "💡"),
-        h("span", null, renderWithCode(item.suggestion || "This dependency might be worth a look.", "s" + item.dependency))
+        h("span", null, renderWithCode(item.suggestion, "s" + item.dependency))
       ),
       h(
         "div",
@@ -223,7 +223,7 @@
       h("p", { className: "detail-label" }, "Why Snooply noticed"),
       h("p", { className: "detail-text" }, item.reason),
       h("p", { className: "detail-label" }, "Suggestion"),
-      h("p", { className: "detail-text" }, renderWithCode(item.suggestion || "This dependency might be worth a look.", "d" + item.dependency))
+      h("p", { className: "detail-text" }, renderWithCode(item.suggestion, "d" + item.dependency))
     );
   }
 

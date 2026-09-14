@@ -43,6 +43,17 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const IGNORED_DIRECTORIES = new Set([
+  "node_modules",
+  ".git",
+  "dist",
+  "build",
+  "coverage",
+  ".next",
+  ".turbo",
+  ".cache",
+]);
+
 function getJavaScriptFiles(directory) {
   const files = [];
 
@@ -54,12 +65,7 @@ function getJavaScriptFiles(directory) {
   }
 
   for (const item of entries) {
-    if (
-      item === "node_modules" ||
-      item === ".git" ||
-      item === "dist" ||
-      item === "build"
-    ) {
+    if (IGNORED_DIRECTORIES.has(item)) {
       continue;
     }
 
@@ -85,6 +91,218 @@ function getJavaScriptFiles(directory) {
   return files;
 }
 
+// Evidence markers that mean "this dependency is genuinely bound/used
+// somewhere" but don't name a specific export — never counted as one of the
+// "few specific functions" the recommendation engine looks for.
+const NON_SPECIFIC_MARKERS = new Set(["default", "*", "JSX"]);
+
+// Generic recursive walk over any Babel AST node — visits every node once.
+// Deliberately untyped/shape-agnostic so it doesn't need updating whenever
+// a new node type (JSX, dynamic import, etc.) shows up in real code.
+function walkAst(node, visit) {
+  if (!node || typeof node.type !== "string") {
+    return;
+  }
+
+  visit(node);
+
+  for (const key of Object.keys(node)) {
+    if (key === "loc" || key === "start" || key === "end" || key === "range") {
+      continue;
+    }
+
+    const value = node[key];
+
+    if (Array.isArray(value)) {
+      for (const child of value) {
+        if (child && typeof child.type === "string") {
+          walkAst(child, visit);
+        }
+      }
+    } else if (value && typeof value.type === "string") {
+      walkAst(value, visit);
+    }
+  }
+}
+
+// Explicit, curated globals for packages that are commonly loaded outside
+// of any module system (a plain <script> tag / UMD build) rather than
+// imported — e.g. Snooply's own popup UI loads React off a <script> tag and
+// never writes `import React from "react"` anywhere. Deliberately NOT a
+// heuristic like "capitalized identifier = dependency" — only these exact,
+// documented global names for these exact packages ever count as evidence.
+const GLOBAL_PACKAGE_BINDINGS = {
+  react: ["React"],
+  "react-dom": ["ReactDOM"],
+  // react-router-dom's own UMD build publishes this as its global name —
+  // not used anywhere in Snooply's own source, but included so the same
+  // conservative mechanism works for projects that do load it this way.
+  "react-router-dom": ["ReactRouterDOM"],
+};
+
+const GLOBAL_NAME_TO_PACKAGE = new Map();
+for (const [pkg, globalNames] of Object.entries(GLOBAL_PACKAGE_BINDINGS)) {
+  for (const globalName of globalNames) {
+    GLOBAL_NAME_TO_PACKAGE.set(globalName, pkg);
+  }
+}
+
+// Resolves an import/require source string to a tracked dependency name,
+// understanding subpath imports like "react-dom/client" or "@scope/pkg/sub"
+// — without this, those are invisible to a plain exact-string match.
+function resolveTrackedPackage(source, dependencies) {
+  if (typeof source !== "string") {
+    return null;
+  }
+  if (dependencies.has(source)) {
+    return source;
+  }
+
+  const segments = source.split("/");
+  const base = source.startsWith("@") ? segments.slice(0, 2).join("/") : segments[0];
+
+  return dependencies.has(base) ? base : null;
+}
+
+function isRequireCall(node) {
+  return (
+    node?.type === "CallExpression" &&
+    node.callee.type === "Identifier" &&
+    node.callee.name === "require"
+  );
+}
+
+function isDynamicImportCall(node) {
+  return node?.type === "CallExpression" && node.callee.type === "Import";
+}
+
+function analyzeFile(code, dependencies, usage) {
+  const ast = parser.parse(code, {
+    sourceType: "unambiguous",
+    plugins: ["jsx"],
+  });
+
+  // Pass 1: collect every import/require/dynamic-import binding in the
+  // file, recording baseline evidence and remembering which local
+  // identifier maps to which dependency (so pass 2 can attribute member
+  // access like `axios.get(...)` or `_.debounce(...)`).
+  const bindings = new Map();
+
+  walkAst(ast.program, (node) => {
+    if (node.type === "ImportDeclaration") {
+      const pkg = resolveTrackedPackage(node.source.value, dependencies);
+      if (!pkg) {
+        return;
+      }
+
+      if (node.specifiers.length === 0) {
+        // Side-effect-only import, e.g. `import "some-polyfill";` — it's
+        // real usage, we just can't attribute it to a named export.
+        usage[pkg].add("default");
+      }
+
+      for (const specifier of node.specifiers) {
+        if (specifier.type === "ImportSpecifier") {
+          usage[pkg].add(specifier.imported.name);
+          bindings.set(specifier.local.name, { pkg, name: specifier.imported.name });
+        } else if (specifier.type === "ImportDefaultSpecifier") {
+          usage[pkg].add("default");
+          bindings.set(specifier.local.name, { pkg, name: null });
+        } else if (specifier.type === "ImportNamespaceSpecifier") {
+          usage[pkg].add("*");
+          bindings.set(specifier.local.name, { pkg, name: null });
+        }
+      }
+      return;
+    }
+
+    if (node.type === "VariableDeclarator") {
+      let init = node.init;
+      if (init?.type === "AwaitExpression") {
+        init = init.argument;
+      }
+
+      if (!isRequireCall(init) && !isDynamicImportCall(init)) {
+        return;
+      }
+
+      const pkg = resolveTrackedPackage(init.arguments[0]?.value, dependencies);
+      if (!pkg) {
+        return;
+      }
+
+      if (node.id.type === "ObjectPattern") {
+        for (const property of node.id.properties) {
+          if (property.type === "ObjectProperty" && property.key.type === "Identifier") {
+            usage[pkg].add(property.key.name);
+            if (property.value.type === "Identifier") {
+              bindings.set(property.value.name, { pkg, name: property.key.name });
+            }
+          }
+        }
+      } else if (node.id.type === "Identifier") {
+        usage[pkg].add("default");
+        bindings.set(node.id.name, { pkg, name: null });
+      }
+    }
+  });
+
+  // Resolves the "object" side of a member expression to a tracked package,
+  // one level deep — covers both plain bindings (`axios.get()`) and calling
+  // a default export as a factory before chaining (`moment().format()`,
+  // a very common pattern for date/query-builder style libraries).
+  function resolveCallTargetPackage(expr) {
+    if (expr.type === "Identifier") {
+      if (bindings.has(expr.name)) {
+        return bindings.get(expr.name).pkg;
+      }
+
+      // No local import/require binding shadows this name — fall back to
+      // an explicit known global (e.g. `React` from a <script> tag), but
+      // only when that package is actually declared as a dependency.
+      const globalPkg = GLOBAL_NAME_TO_PACKAGE.get(expr.name);
+      return globalPkg && dependencies.has(globalPkg) ? globalPkg : null;
+    }
+
+    if (expr.type === "CallExpression") {
+      if (isRequireCall(expr) || isDynamicImportCall(expr)) {
+        return resolveTrackedPackage(expr.arguments[0]?.value, dependencies);
+      }
+      if (expr.callee.type === "Identifier" && bindings.has(expr.callee.name)) {
+        return bindings.get(expr.callee.name).pkg;
+      }
+    }
+
+    return null;
+  }
+
+  // Pass 2: look for evidence of *what's actually used* — member access on
+  // a known binding or global (`React.createElement`, `_.debounce`,
+  // `axios.get`), the same pattern chained inline off a require()/import()
+  // with no intermediate variable, calling a default export before
+  // chaining (`moment().format()`), and JSX itself as evidence of React
+  // usage. Deliberately matches MemberExpression itself, not just ones
+  // used as a call's callee — `const h = React.createElement;` is real
+  // evidence even though `createElement` is never actually invoked there.
+  walkAst(ast.program, (node) => {
+    if (node.type === "MemberExpression" && !node.computed && node.property.type === "Identifier") {
+      const pkg = resolveCallTargetPackage(node.object);
+
+      if (pkg) {
+        usage[pkg].add(node.property.name);
+      }
+      return;
+    }
+
+    if ((node.type === "JSXElement" || node.type === "JSXFragment") && usage.react) {
+      // JSX is evidence of React usage even with no explicit `import React`
+      // (the modern automatic JSX runtime) — but it's not a specific named
+      // export, so it's tracked as its own honest marker, not invented API.
+      usage.react.add("JSX");
+    }
+  });
+}
+
 async function analyzeUsage(projectPath, dependencies) {
   const files = getJavaScriptFiles(projectPath);
   const usage = {};
@@ -96,76 +314,12 @@ async function analyzeUsage(projectPath, dependencies) {
   for (let i = 0; i < files.length; i++) {
     const code = fs.readFileSync(files[i], "utf-8");
 
-    let ast;
-
     try {
-      ast = parser.parse(code, {
-        sourceType: "unambiguous",
-        plugins: ["jsx"],
-      });
+      analyzeFile(code, dependencies, usage);
     } catch (error) {
+      // Unparsable file (syntax error, unsupported syntax) — skip it and
+      // keep going rather than losing the rest of the project's evidence.
       continue;
-    }
-
-    for (const node of ast.program.body) {
-
-      // ES module imports
-      if (node.type === "ImportDeclaration") {
-        const packageName = node.source.value;
-
-        if (!dependencies.has(packageName)) {
-          continue;
-        }
-
-        if (node.specifiers.length === 0) {
-          // Side-effect-only import, e.g. `import "some-polyfill";` —
-          // it's real usage, we just can't attribute it to a named export.
-          usage[packageName].add("default");
-        }
-
-        for (const specifier of node.specifiers) {
-          if (specifier.type === "ImportSpecifier") {
-            usage[packageName].add(specifier.imported.name);
-          }
-
-          if (specifier.type === "ImportDefaultSpecifier") {
-            usage[packageName].add("default");
-          }
-
-          if (specifier.type === "ImportNamespaceSpecifier") {
-            usage[packageName].add("*");
-          }
-        }
-      }
-
-      // CommonJS require
-      if (node.type === "VariableDeclaration") {
-        for (const declaration of node.declarations) {
-          if (declaration.init?.type !== "CallExpression") {
-            continue;
-          }
-
-          if (declaration.init.callee.name !== "require") {
-            continue;
-          }
-
-          const packageName = declaration.init.arguments[0]?.value;
-
-          if (!packageName || !dependencies.has(packageName)) {
-            continue;
-          }
-
-          if (declaration.id.type === "ObjectPattern") {
-            for (const property of declaration.id.properties) {
-              if (property.type === "ObjectProperty") {
-                usage[packageName].add(property.key.name);
-              }
-            }
-          } else {
-            usage[packageName].add("default");
-          }
-        }
-      }
     }
 
     // Yield periodically so the status animation actually gets a chance
@@ -180,102 +334,53 @@ async function analyzeUsage(projectPath, dependencies) {
 
 // --- Recommendation engine ---
 //
-// Turns raw usage evidence into a verdict. Never based on percentages —
-// only on how many distinct named imports we actually observed.
+// Snooply produces exactly two kinds of finding, both meant to be
+// immediately actionable — everything else is silently NO_FINDING:
+//
+//   UNUSED             the dependency has zero detected source usage
+//   KNOWN_ALTERNATIVE  usage is narrow AND a concrete, curated alternative
+//                      is known for exactly that usage
+//
+// There is deliberately no "few functions used" heuristic on its own.
+// Calling one or two APIs out of a library that exposes hundreds is normal,
+// not suspicious — it's evidence about *how* something is used, never
+// evidence that it's unnecessary. A recommendation only exists when Snooply
+// can answer all three of: what did it find, why does it matter, what can
+// the developer actually do about it.
 
-const WHOLE_MODULE_MARKERS = new Set(["default", "*"]);
 const FEW_FUNCTIONS_LIMIT = 2;
 
-function classifyDependency(name, used, isDevDependency) {
-  const namedUsage = [...used].filter(
-    (importedName) => !WHOLE_MODULE_MARKERS.has(importedName)
-  );
-  const importsWholeModule = [...used].some((importedName) =>
-    WHOLE_MODULE_MARKERS.has(importedName)
-  );
+// Packages whose architectural role can't be judged by API count — a
+// framework/build-tool dependency is never flagged just because only a
+// couple of its APIs turned up in a scan.
+const FRAMEWORK_PACKAGES = new Set([
+  "react",
+  "react-dom",
+  "react-router-dom",
+  "vite",
+  "webpack",
+  "babel",
+  "typescript",
+  "eslint",
+  "next",
+  "vue",
+  "@vue/runtime-core",
+  "angular",
+  "@angular/core",
+  "svelte",
+  "express",
+  "fastify",
+  "nestjs",
+  "electron",
+]);
+const FRAMEWORK_PACKAGE_PREFIXES = ["@babel/", "eslint-plugin-", "eslint-config-", "@typescript-eslint/"];
 
-  if (used.size === 0) {
-    if (isDevDependency) {
-      return {
-        status: "NOT_ENOUGH_EVIDENCE",
-        reason: `${name} is a devDependency with no detected source imports, which is normal for build/lint/test tooling.`,
-      };
-    }
-
-    return {
-      status: "UNUSED",
-      reason: `Snooply didn't find \`${name}\` imported anywhere in your code.`,
-    };
-  }
-
-  if (namedUsage.length === 0 && importsWholeModule) {
-    return {
-      status: "NOT_ENOUGH_EVIDENCE",
-      reason: `\`${name}\` is only ever imported as a whole module, so Snooply can't tell which parts of it you actually use.`,
-    };
-  }
-
-  if (namedUsage.length <= FEW_FUNCTIONS_LIMIT) {
-    return {
-      status: "WORTH_LOOKING_AT",
-      used: namedUsage,
-      reason: `You're using only ${formatList(namedUsage)} from \`${name}\`.`,
-    };
-  }
-
-  return {
-    status: "DO_NOT_FLAG",
-    used: namedUsage,
-    reason: `You're using ${namedUsage.length} different exports from \`${name}\` (${namedUsage.join(", ")}).`,
-  };
+function isFrameworkPackage(name) {
+  return FRAMEWORK_PACKAGES.has(name) || FRAMEWORK_PACKAGE_PREFIXES.some((prefix) => name.startsWith(prefix));
 }
 
 function formatList(names) {
   return names.map((n) => `\`${n}\``).join(" and ");
-}
-
-// --- Suggestion engine ---
-//
-// Purely additive: it never influences `status` from the recommendation
-// engine above. It only speaks up when we have a confident, curated
-// alternative for EVERY named function actually used — if even one used
-// function has no known alternative, it stays quiet rather than guessing.
-// When it does speak up, it names the actual package — never a vague
-// "you might not need this" with nothing concrete behind it.
-
-const KNOWN_ALTERNATIVES = {
-  lodash: {
-    debounce: "just-debounce-it",
-    throttle: "just-throttle",
-  },
-};
-
-function getSuggestion(dependency, namedUsage) {
-  const known = KNOWN_ALTERNATIVES[dependency];
-
-  if (!known || namedUsage.length === 0) {
-    return null;
-  }
-
-  const packages = [];
-
-  for (const fn of namedUsage) {
-    if (!known[fn]) {
-      return null;
-    }
-
-    if (!packages.includes(known[fn])) {
-      packages.push(known[fn]);
-    }
-  }
-
-  const text = [
-    `You're only using ${formatBacktickList(namedUsage)}.`,
-    "",
-    `Try ${formatBacktickList(packages)} instead.`,
-  ].join("\n");
-
-  return { text, packages };
 }
 
 function formatBacktickList(items) {
@@ -290,36 +395,141 @@ function joinWithAnd(items) {
   return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
 }
 
+// --- Curated alternative knowledge base ---
+//
+// Deliberately tiny and explicit. If a dependency/usage pattern isn't
+// listed here, there is no recommendation — Snooply never invents one.
+
+// Per-function: "if the entire narrow usage is covered by this map, here's
+// a smaller single-purpose replacement for exactly that."
+const FUNCTION_ALTERNATIVES = {
+  lodash: {
+    debounce: "just-debounce-it",
+    throttle: "just-throttle",
+  },
+};
+
+// Whole-package migrations (e.g. moment → date-fns) are intentionally left
+// out of the MVP knowledge base for now — the API shapes are different
+// enough (chainable/mutable vs. functional/immutable) that "replace X with
+// Y" risks overstating how simple the swap actually is. Only add one back
+// once there's a specific, defensible case for it.
+
+function findKnownAlternative(dependency, namedUsage) {
+  const known = FUNCTION_ALTERNATIVES[dependency];
+  if (!known || namedUsage.length === 0) {
+    return null;
+  }
+
+  const packages = [];
+  for (const fn of namedUsage) {
+    if (!known[fn]) {
+      return null;
+    }
+    if (!packages.includes(known[fn])) {
+      packages.push(known[fn]);
+    }
+  }
+
+  return { packages };
+}
+
+function evaluateDependency(name, used, isDevDependency) {
+  const namedUsage = [...used].filter((marker) => !NON_SPECIFIC_MARKERS.has(marker));
+
+  if (used.size === 0) {
+    if (isDevDependency) {
+      // Normal for build/lint/test tooling — not worth surfacing.
+      return { status: "NO_FINDING" };
+    }
+
+    return {
+      status: "UNUSED",
+      reason: `Snooply couldn't find \`${name}\` used anywhere in your source files.`,
+      suggestion: "If you no longer need it, you can remove it.",
+    };
+  }
+
+  if (isFrameworkPackage(name)) {
+    return { status: "NO_FINDING" };
+  }
+
+  if (namedUsage.length === 0) {
+    // Only whole-module evidence (default/namespace import, or JSX with no
+    // specific attribution) — too thin to say anything concrete, so Snooply
+    // stays quiet rather than guessing.
+    return { status: "NO_FINDING" };
+  }
+
+  if (namedUsage.length > FEW_FUNCTIONS_LIMIT) {
+    // Broad, varied usage of a broad library — using many of its
+    // capabilities is exactly what it's there for.
+    return { status: "NO_FINDING" };
+  }
+
+  if (isDevDependency) {
+    // The "smaller runtime footprint" motivation behind these alternatives
+    // doesn't apply to devDependencies — they aren't shipped, so there's
+    // nothing concrete to recommend even with narrow usage.
+    return { status: "NO_FINDING" };
+  }
+
+  const alternative = findKnownAlternative(name, namedUsage);
+  if (!alternative) {
+    // Narrow usage alone is never a recommendation on its own — only flag
+    // it when there's a concrete, curated alternative to point at.
+    return { status: "NO_FINDING" };
+  }
+
+  return {
+    status: "KNOWN_ALTERNATIVE",
+    used: namedUsage,
+    reason: `You're only using ${formatList(namedUsage)} from \`${name}\`.`,
+    suggestion: `If ${formatList(namedUsage)} ${namedUsage.length === 1 ? "is" : "are"} all you need, consider ${formatBacktickList(alternative.packages)} instead.`,
+    suggestedPackages: alternative.packages,
+  };
+}
+
+// Turns a raw usage Set (which may contain internal markers like "default"
+// or "JSX" alongside real export names) into what the CLI should actually
+// print — never the raw sentinels themselves.
+function formatUsageForDisplay(used) {
+  const named = [...used].filter((name) => !NON_SPECIFIC_MARKERS.has(name));
+  const labels = [...named];
+
+  if (used.has("JSX")) {
+    labels.push("JSX usage");
+  }
+
+  if (labels.length === 0 && (used.has("default") || used.has("*"))) {
+    labels.push("default import usage");
+  }
+
+  return labels.length > 0 ? labels.join(", ") : null;
+}
+
 function buildResults(usage, devDependencyNames) {
   const recommendations = [];
   const unused = [];
 
   for (const [dependency, used] of Object.entries(usage)) {
-    const result = classifyDependency(
-      dependency,
-      used,
-      devDependencyNames.has(dependency)
-    );
+    const result = evaluateDependency(dependency, used, devDependencyNames.has(dependency));
 
-    if (result.status === "WORTH_LOOKING_AT") {
-      const suggestion = getSuggestion(dependency, result.used);
-
+    if (result.status === "KNOWN_ALTERNATIVE") {
       recommendations.push({
         dependency,
         used: result.used,
         reason: result.reason,
-        // Evidence-based even without a known alternative — never a made-up
-        // package name just to have something to say.
-        suggestion: suggestion ? suggestion.text : "This dependency might be worth a look.",
-        suggestedPackages: suggestion ? suggestion.packages : [],
-        hasAlternative: suggestion !== null,
+        suggestion: result.suggestion,
+        suggestedPackages: result.suggestedPackages,
+        hasAlternative: true,
       });
     } else if (result.status === "UNUSED") {
       unused.push({
         dependency,
         used: [],
         reason: result.reason,
-        suggestion: null,
+        suggestion: result.suggestion,
         suggestedPackages: [],
         hasAlternative: false,
       });
@@ -344,6 +554,30 @@ const NODE_MODULES_DIR = path.join(__dirname, "..", "node_modules");
 
 function readUiFile(...segments) {
   return fs.readFileSync(path.join(...segments), "utf-8");
+}
+
+// The page itself is just this shell — all real markup comes from React
+// (app.jsx) and all styling from app.css, so there's no separate HTML file
+// to keep in sync.
+function buildHtmlDocument(payload) {
+  const dataJson = JSON.stringify(payload).replace(/</g, "\\u003c");
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Snooply</title>
+<link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <div id="root"></div>
+  <script id="snooply-data" type="application/json">${dataJson}</script>
+  <script src="/react.js"></script>
+  <script src="/react-dom.js"></script>
+  <script src="/app.jsx"></script>
+</body>
+</html>`;
 }
 
 function resolveElectronBinary() {
@@ -404,7 +638,7 @@ function openPopupWindow(url) {
     const env = { ...process.env };
     delete env.ELECTRON_RUN_AS_NODE;
 
-    spawn(electronBinary, [path.join(UI_DIR, "electron-main.js"), url], {
+    spawn(electronBinary, [path.join(__dirname, "electron-main.js"), url], {
       stdio: "ignore",
       detached: true,
       env,
@@ -448,15 +682,14 @@ function showReactPopup(flaggedItems, dependencies, usage) {
 
       try {
         if (url === "/") {
-          const html = readUiFile(UI_DIR, "index.html").replace(
-            "__SNOOPLY_DATA__",
-            JSON.stringify(payload).replace(/</g, "\\u003c")
-          );
           res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-          res.end(html);
-        } else if (url === "/app.js") {
+          res.end(buildHtmlDocument(payload));
+        } else if (url === "/app.jsx") {
           res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8" });
-          res.end(readUiFile(UI_DIR, "app.js"));
+          res.end(readUiFile(UI_DIR, "app.jsx"));
+        } else if (url === "/app.css") {
+          res.writeHead(200, { "Content-Type": "text/css; charset=utf-8" });
+          res.end(readUiFile(UI_DIR, "app.css"));
         } else if (url === "/react.js") {
           res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8" });
           res.end(readUiFile(NODE_MODULES_DIR, "react", "umd", "react.production.min.js"));
@@ -552,11 +785,8 @@ async function main() {
   console.log("Snooply found usage:\n");
 
   for (const [dependency, used] of Object.entries(usage)) {
-    if (used.size === 0) {
-      console.log(`• ${dependency}: not detected`);
-    } else {
-      console.log(`• ${dependency}: ${[...used].join(", ")}`);
-    }
+    const display = formatUsageForDisplay(used);
+    console.log(`• ${dependency}: ${display || "not detected"}`);
   }
 
   console.log("\n" + "=".repeat(40) + "\n");
