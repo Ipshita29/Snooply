@@ -685,6 +685,7 @@ function showReactPopup(flaggedItems, dependencies, usage) {
       items: flaggedItems,
       dependencies: [...dependencies],
       usage: Object.fromEntries([...dependencies].map((dep) => [dep, [...(usage[dep] || [])]])),
+      version: require("../package.json").version,
     };
 
     let firstPingReceived = false;

@@ -6,7 +6,7 @@
     try {
       return JSON.parse(el.textContent);
     } catch (error) {
-      return { items: [], dependencies: [], usage: {} };
+      return { items: [], dependencies: [], usage: {}, version: null };
     }
   }
 
@@ -31,14 +31,6 @@
     } catch (error) {
       // Browser may refuse this - the CLI has already exited anyway
     }
-  }
-
-  function reportSize(el) {
-    if (!el || !window.snooply || typeof window.snooply.resize !== "function") {
-      return;
-    }
-    const height = Math.ceil(el.getBoundingClientRect().height) + 28; // + .app padding
-    window.snooply.resize(height);
   }
 
   // Handle popup dragging
@@ -96,41 +88,17 @@
     return parts.map((part, i) => (i % 2 === 1 ? h("code", { key: keyPrefix + i }, part) : part));
   }
 
-  // Show the mascot
-  function Mascot(props) {
-    const size = (props && props.size) || 60;
-    return h(
-      "svg",
-      { className: "mascot", width: size, height: size, viewBox: "0 0 64 64", fill: "none" },
-      h(
-        "defs",
-        null,
-        h(
-          "linearGradient",
-          { id: "mascotHead", x1: "0", y1: "0", x2: "0", y2: "1" },
-          h("stop", { offset: "0%", stopColor: "#ffffff" }),
-          h("stop", { offset: "100%", stopColor: "#dfe3f0" })
-        ),
-        h(
-          "linearGradient",
-          { id: "mascotEar", x1: "0", y1: "0", x2: "0", y2: "1" },
-          h("stop", { offset: "0%", stopColor: "#eef0f7" }),
-          h("stop", { offset: "100%", stopColor: "#c7cce0" })
-        )
-      ),
-      // floppy ears
-      h("ellipse", { cx: 14, cy: 30, rx: 8.5, ry: 13, fill: "url(#mascotEar)", transform: "rotate(-24 14 30)" }),
-      h("ellipse", { cx: 50, cy: 30, rx: 8.5, ry: 13, fill: "url(#mascotEar)", transform: "rotate(24 50 30)" }),
-      // head
-      h("circle", { cx: 32, cy: 35, r: 19, fill: "url(#mascotHead)" }),
-      // blush
-      h("ellipse", { cx: 21, cy: 41, rx: 3.2, ry: 2.2, fill: "#f9a8d4", opacity: 0.45 }),
-      h("ellipse", { cx: 43, cy: 41, rx: 3.2, ry: 2.2, fill: "#f9a8d4", opacity: 0.45 }),
-      // eyes + nose
-      h("circle", { cx: 25, cy: 33, r: 2.4, fill: "#12162a" }),
-      h("circle", { cx: 39, cy: 33, r: 2.4, fill: "#12162a" }),
-      h("ellipse", { cx: 32, cy: 41, rx: 3, ry: 2.2, fill: "#12162a" })
-    );
+  // Part 7 tags cross-workspace names like "axios (client)" - strip that
+  // back off for anything that has to be real, like an npm command.
+  function baseDependencyName(name) {
+    return String(name).replace(/\s\([^)]+\)$/, "");
+  }
+
+  // Two-letter monogram for a package, no icon library needed
+  function iconLettersFor(name) {
+    const base = baseDependencyName(name);
+    const last = base.includes("/") ? base.split("/").pop() : base;
+    return last.slice(0, 2).toLowerCase();
   }
 
   function CloseButton(props) {
@@ -145,15 +113,31 @@
     );
   }
 
+  // Three small dots to hint the card is draggable
+  function DragDots() {
+    return h(
+      "div",
+      { className: "drag-dots", "aria-hidden": "true" },
+      h("span", null),
+      h("span", null),
+      h("span", null)
+    );
+  }
+
   function badgeFor(item) {
     return item.kind === "UNUSED" ? { text: "Unused", cls: "unused" } : { text: "Worth a look", cls: "look" };
+  }
+
+  function Badge(props) {
+    const badge = badgeFor(props.item);
+    return h("span", { className: "badge " + badge.cls }, h("span", { className: "dot" }), badge.text);
   }
 
   // Show one recommendation card
   function RecommendationCard(props) {
     const item = props.item;
-    const badge = badgeFor(item);
     const hasUsage = item.used && item.used.length > 0;
+    const isUnused = item.kind === "UNUSED";
 
     return h(
       "div",
@@ -161,8 +145,9 @@
       h(
         "div",
         { className: "rec-top" },
+        h("span", { className: "rec-icon" }, iconLettersFor(item.dependency)),
         h("span", { className: "rec-name" }, item.dependency),
-        h("span", { className: "badge " + badge.cls }, badge.text)
+        h(Badge, { item })
       ),
       hasUsage
         ? h(
@@ -179,12 +164,13 @@
       h(
         "p",
         { className: "suggestion" },
-        h("span", null, "💡"),
-        h("span", null, renderWithCode(item.suggestion, "s" + item.dependency))
+        renderWithCode(item.suggestion, "s" + item.dependency)
       ),
       h(
         "div",
-        { className: "card-actions" },
+        { className: "card-actions" + (isUnused ? "" : " only-explore") },
+        isUnused &&
+          h("code", { className: "uninstall-pill" }, `npm uninstall ${baseDependencyName(item.dependency)}`),
         h("button", { className: "explore-btn", onClick: () => props.onExplore(item) }, "Explore", h("span", null, "→"))
       )
     );
@@ -193,8 +179,8 @@
   // Show the full details for one dependency
   function ExploreView(props) {
     const item = props.item;
-    const badge = badgeFor(item);
     const hasUsage = item.used && item.used.length > 0;
+    const isUnused = item.kind === "UNUSED";
 
     return h(
       "div",
@@ -203,8 +189,9 @@
       h(
         "div",
         { className: "rec-top", style: { marginTop: 8 } },
-        h("span", { className: "rec-name", style: { fontSize: 17 } }, item.dependency),
-        h("span", { className: "badge " + badge.cls }, badge.text)
+        h("span", { className: "rec-icon" }, iconLettersFor(item.dependency)),
+        h("span", { className: "rec-name", style: { fontSize: 16 } }, item.dependency),
+        h(Badge, { item })
       ),
       hasUsage &&
         h(
@@ -220,7 +207,9 @@
       h("p", { className: "detail-label" }, "Why Snooply noticed"),
       h("p", { className: "detail-text" }, item.reason),
       h("p", { className: "detail-label" }, "Suggestion"),
-      h("p", { className: "detail-text" }, renderWithCode(item.suggestion, "d" + item.dependency))
+      h("p", { className: "detail-text" }, renderWithCode(item.suggestion, "d" + item.dependency)),
+      isUnused &&
+        h("code", { className: "uninstall-pill", style: { marginTop: 14, display: "inline-block" } }, `npm uninstall ${baseDependencyName(item.dependency)}`)
     );
   }
 
@@ -230,7 +219,7 @@
       "div",
       null,
       h("button", { className: "back-btn", onClick: props.onBack }, "← Back"),
-      h("p", { className: "headline", style: { fontSize: 16, marginTop: 8, textAlign: "left" } }, "All dependencies"),
+      h("p", { className: "headline", style: { fontSize: 15, marginTop: 8, textAlign: "left" } }, "All dependencies"),
       h(
         "div",
         { className: "deps-list" },
@@ -247,20 +236,50 @@
     );
   }
 
+  // "See all dependencies" row, shared by the list and empty states
+  function SeeAllRow(props) {
+    return h(
+      "button",
+      { className: "see-all", onClick: props.onSeeAll },
+      h(
+        "svg",
+        { className: "see-all-icon", width: 14, height: 14, viewBox: "0 0 16 16", fill: "none" },
+        h("rect", { x: 1, y: 1, width: 6, height: 6, rx: 1.5, stroke: "currentColor", strokeWidth: 1.3 }),
+        h("rect", { x: 9, y: 1, width: 6, height: 6, rx: 1.5, stroke: "currentColor", strokeWidth: 1.3 }),
+        h("rect", { x: 1, y: 9, width: 6, height: 6, rx: 1.5, stroke: "currentColor", strokeWidth: 1.3 }),
+        h("rect", { x: 9, y: 9, width: 6, height: 6, rx: 1.5, stroke: "currentColor", strokeWidth: 1.3 })
+      ),
+      h("span", { className: "see-all-label" }, "See all dependencies"),
+      h("span", { className: "see-all-arrow" }, "›")
+    );
+  }
+
+  // Small info line at the bottom of the popup
+  function Footer(props) {
+    return h(
+      "div",
+      { className: "footer" },
+      h("span", null, "ⓘ Keep what you use. Lose the rest."),
+      props.version && h("span", null, `v${props.version}`)
+    );
+  }
+
   // Show empty state (nothing found)
   function EmptyState(props) {
     return h(
       "div",
       { className: "empty-state" },
-      h("div", { className: "mascot-wrap" }, h(Mascot, null)),
       h("p", { className: "headline" }, "Snooply took a little look…"),
       h("p", { className: "subhead" }, "Everything looks pretty reasonable! ♡"),
       h("p", { className: "subhead-2" }, "Nothing worth bothering you about right now."),
-      h("button", { className: "see-all", onClick: props.onSeeAll }, "See all dependencies →")
+      h(SeeAllRow, { onSeeAll: props.onSeeAll }),
+      h(Footer, { version: props.version })
     );
   }
 
-  // Popup frame - background glow, card, drag handling
+  // Popup frame - background glow, fixed-size card, drag handling
+  // The card's size never changes; whatever view is showing scrolls
+  // inside it instead of the window growing or shrinking.
   function Shell(props) {
     return h(
       React.Fragment,
@@ -271,7 +290,13 @@
       h(
         "div",
         { className: "app" },
-        h("div", { className: "popup-card", ref: props.cardRef, onMouseDown: handleCardMouseDown }, props.children)
+        h(
+          "div",
+          { className: "popup-card", onMouseDown: handleCardMouseDown },
+          h(DragDots, null),
+          props.closeButton,
+          h("div", { className: "popup-scroll" }, props.children)
+        )
       )
     );
   }
@@ -281,26 +306,10 @@
     const items = data.items || [];
     const [view, setView] = React.useState("list"); // list | explore | all | closed
     const [selected, setSelected] = React.useState(null);
-    const cardRef = React.useRef(null);
 
     React.useEffect(() => {
       startHeartbeat();
     }, []);
-
-    // Resize the window to fit whatever view is showing
-    React.useEffect(() => {
-      if (!cardRef.current || typeof ResizeObserver === "undefined") {
-        return;
-      }
-      const observer = new ResizeObserver((entries) => {
-        for (const entry of entries) {
-          reportSize(entry.target);
-        }
-      });
-      observer.observe(cardRef.current);
-      reportSize(cardRef.current);
-      return () => observer.disconnect();
-    }, [view, selected]);
 
     function handleClose() {
       setView("closed");
@@ -308,14 +317,16 @@
       setTimeout(requestWindowClose, 250);
     }
 
+    const closeButton = h(CloseButton, { onClose: handleClose });
+
     if (view === "closed") {
       return h(
         Shell,
-        { cardRef },
-        h(CloseButton, { onClose: handleClose }),
-        h("div", { className: "empty-state" },
-          h("div", { className: "mascot-wrap" }, h(Mascot, { size: 48 })),
-          h("p", { className: "headline" }, "See you soon! 🐾"),
+        { closeButton },
+        h(
+          "div",
+          { className: "empty-state" },
+          h("p", { className: "headline" }, "See you soon"),
           h("p", { className: "subhead" }, "You can close this window now.")
         )
       );
@@ -329,14 +340,15 @@
     } else if (view === "all") {
       body = h(AllDependenciesView, { dependencies: data.dependencies, usage: data.usage, onBack: () => setView("list") });
     } else if (items.length === 0) {
-      body = h(EmptyState, { onSeeAll: () => setView("all") });
+      body = h(EmptyState, { onSeeAll: () => setView("all"), version: data.version });
     } else {
+      const noun = items.length === 1 ? "thing" : "things";
       body = h(
         React.Fragment,
         null,
-        h("div", { className: "mascot-wrap" }, h(Mascot, null)),
-        h("p", { className: "headline" }, items.length === 1 ? "Snooply found something!" : `Snooply found ${items.length} things!`),
-        h("p", { className: "subhead" }, "I think these are worth a look 👀"),
+        h("p", { className: "brand-title" }, "Snooply"),
+        h("p", { className: "brand-subhead" }, "A cleaner project starts here."),
+        h("p", { className: "finding-count" }, `Found ${items.length} ${noun} worth checking.`),
         h(
           "div",
           { className: "card-list" },
@@ -351,11 +363,12 @@
             })
           )
         ),
-        h("button", { className: "see-all", onClick: () => setView("all") }, "See all dependencies →")
+        h(SeeAllRow, { onSeeAll: () => setView("all") }),
+        h(Footer, { version: data.version })
       );
     }
 
-    return h(Shell, { cardRef }, h(CloseButton, { onClose: handleClose }), body);
+    return h(Shell, { closeButton }, body);
   }
 
   const data = getData();

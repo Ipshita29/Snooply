@@ -8,7 +8,7 @@ const path = require("path");
 const targetUrl = process.argv[2];
 
 const WINDOW_WIDTH = 400;
-const INITIAL_HEIGHT = 220;
+const WINDOW_HEIGHT = 620;
 const RIGHT_MARGIN = 28;
 
 // Keep the window on screen
@@ -32,9 +32,9 @@ function createWindow() {
 
   const win = new BrowserWindow({
     width: WINDOW_WIDTH,
-    height: INITIAL_HEIGHT,
+    height: WINDOW_HEIGHT,
     x: screenWidth - WINDOW_WIDTH - RIGHT_MARGIN,
-    y: Math.round((screenHeight - INITIAL_HEIGHT) / 2),
+    y: Math.round((screenHeight - WINDOW_HEIGHT) / 2),
     frame: false,
     transparent: true,
     hasShadow: false,
@@ -55,18 +55,6 @@ function createWindow() {
   win.once("ready-to-show", () => win.show());
   win.loadURL(targetUrl);
 
-  // Resize without moving the window
-  // (keeps whatever position the user dragged it to)
-  const resizeListener = (event, height) => {
-    if (event.sender !== win.webContents) {
-      return;
-    }
-
-    const current = win.getBounds();
-    const nextHeight = Math.max(160, Math.min(Math.round(height), screenHeight - 80));
-    win.setBounds(clampToDisplay({ x: current.x, y: current.y, width: WINDOW_WIDTH, height: nextHeight }));
-  };
-
   const closeListener = (event) => {
     if (event.sender !== win.webContents) {
       return;
@@ -84,12 +72,10 @@ function createWindow() {
     win.setBounds(clampToDisplay({ x: current.x + dx, y: current.y + dy, width: current.width, height: current.height }));
   };
 
-  ipcMain.on("snooply:resize", resizeListener);
   ipcMain.on("snooply:close", closeListener);
   ipcMain.on("snooply:move", moveListener);
 
   win.on("closed", () => {
-    ipcMain.removeListener("snooply:resize", resizeListener);
     ipcMain.removeListener("snooply:close", closeListener);
     ipcMain.removeListener("snooply:move", moveListener);
     app.quit();
