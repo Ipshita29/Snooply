@@ -54,7 +54,12 @@ const IGNORED_DIRECTORIES = new Set([
   ".cache",
 ]);
 
-function getJavaScriptFiles(directory) {
+// `excludedDirs` holds the absolute paths of OTHER workspaces nested inside
+// this one (see findWorkspaceRoots below) — a workspace scans its own tree
+// but never descends into a sibling/nested package, which is scanned
+// separately as its own workspace. Empty for a plain single-package project,
+// so existing behavior is unaffected.
+function getJavaScriptFiles(directory, excludedDirs = new Set()) {
   const files = [];
 
   let entries;
@@ -71,6 +76,10 @@ function getJavaScriptFiles(directory) {
 
     const fullPath = path.join(directory, item);
 
+    if (excludedDirs.has(fullPath)) {
+      continue;
+    }
+
     let stats;
     try {
       stats = fs.statSync(fullPath);
@@ -79,7 +88,7 @@ function getJavaScriptFiles(directory) {
     }
 
     if (stats.isDirectory()) {
-      files.push(...getJavaScriptFiles(fullPath));
+      files.push(...getJavaScriptFiles(fullPath, excludedDirs));
     } else if (
       item.endsWith(".js") ||
       item.endsWith(".jsx")
@@ -89,6 +98,47 @@ function getJavaScriptFiles(directory) {
   }
 
   return files;
+}
+
+// Recursively finds every directory containing its own package.json, from
+// startDir downward, skipping the same generated/dependency directories the
+// analyzer already ignores. This is deliberately just "find package.json
+// boundaries" rather than parsing a "workspaces" field or glob patterns —
+// it naturally covers plain workspaces config, apps/*, packages/*, and any
+// other layout, without needing to know about any of them specifically.
+function findWorkspaceRoots(startDir) {
+  const roots = [];
+
+  function walk(dir) {
+    if (fs.existsSync(path.join(dir, "package.json"))) {
+      roots.push(dir);
+    }
+
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (error) {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory() || IGNORED_DIRECTORIES.has(entry.name)) {
+        continue;
+      }
+      walk(path.join(dir, entry.name));
+    }
+  }
+
+  walk(startDir);
+  return roots;
+}
+
+// A short, human-readable label for a workspace — the path relative to the
+// project root (e.g. "client", "apps/web"), or "root" for the top-level
+// package itself. Only ever shown when more than one workspace exists.
+function getWorkspaceLabel(root, projectPath) {
+  const relative = path.relative(projectPath, root);
+  return relative === "" ? "root" : relative.split(path.sep).join("/");
 }
 
 // Evidence markers that mean "this dependency is genuinely bound/used
@@ -303,8 +353,8 @@ function analyzeFile(code, dependencies, usage) {
   });
 }
 
-async function analyzeUsage(projectPath, dependencies) {
-  const files = getJavaScriptFiles(projectPath);
+async function analyzeUsage(projectPath, dependencies, excludedDirs = new Set()) {
+  const files = getJavaScriptFiles(projectPath, excludedDirs);
   const usage = {};
 
   for (const dependency of dependencies) {
@@ -741,71 +791,153 @@ function showReactPopup(flaggedItems, dependencies, usage) {
 
 async function main() {
   const projectPath = process.cwd();
-  const packageJsonPath = path.join(projectPath, "package.json");
+  const verbose = process.argv.includes("--verbose");
 
-  if (!fs.existsSync(packageJsonPath)) {
+  const workspaceRoots = findWorkspaceRoots(projectPath);
+
+  if (workspaceRoots.length === 0) {
     console.log("🐾 Snooply couldn't find a package.json here.");
     process.exitCode = 1;
     return;
   }
 
-  let packageJson;
-  try {
-    packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8"));
-  } catch (error) {
-    console.log("🐾 Snooply found a package.json here, but couldn't read it (invalid JSON).");
-    process.exitCode = 1;
-    return;
+  // A plain single-package project (the common case, and everything Snooply
+  // supported before this) must keep behaving exactly as it did — including
+  // this exact error message when that one package.json is malformed.
+  if (workspaceRoots.length === 1) {
+    try {
+      JSON.parse(fs.readFileSync(path.join(workspaceRoots[0], "package.json"), "utf-8"));
+    } catch (error) {
+      console.log("🐾 Snooply found a package.json here, but couldn't read it (invalid JSON).");
+      process.exitCode = 1;
+      return;
+    }
   }
 
   const stopStatusAnimation = startStatusAnimation(STATUS_MESSAGES);
 
-  const devDependencyNames = new Set(
-    Object.keys(packageJson.devDependencies || {})
-  );
+  const workspaces = [];
 
-  const dependencies = new Set([
-    ...Object.keys(packageJson.dependencies || {}),
-    ...devDependencyNames,
-  ]);
+  for (const root of workspaceRoots) {
+    let packageJson;
+    try {
+      packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf-8"));
+    } catch (error) {
+      // Malformed package.json in one workspace of a multi-package project
+      // shouldn't take down the scan for every other workspace.
+      continue;
+    }
 
-  const usage = await analyzeUsage(projectPath, dependencies);
-  const { recommendations, unused } = buildResults(usage, devDependencyNames);
+    const devDependencyNames = new Set(Object.keys(packageJson.devDependencies || {}));
+    const dependencies = new Set([
+      ...Object.keys(packageJson.dependencies || {}),
+      ...devDependencyNames,
+    ]);
+
+    // Other discovered workspaces nested inside this one are scanned on
+    // their own — never as part of this package's source tree, so a
+    // dependency in one package can't get credited with usage that
+    // actually lives in another.
+    const excludedDirs = new Set(
+      workspaceRoots.filter((other) => other !== root && other.startsWith(root + path.sep))
+    );
+
+    const usage = await analyzeUsage(root, dependencies, excludedDirs);
+    const { recommendations, unused } = buildResults(usage, devDependencyNames);
+
+    workspaces.push({
+      label: getWorkspaceLabel(root, projectPath),
+      dependencies,
+      usage,
+      recommendations,
+      unused,
+    });
+  }
 
   stopStatusAnimation();
 
-  console.log("Snooply found your dependencies:\n");
+  const showWorkspaceLabels = workspaces.length > 1;
 
-  for (const dependency of dependencies) {
-    console.log(`• ${dependency}`);
+  // The analyzer always computes full evidence per workspace (see
+  // analyzeUsage/buildResults above) — this is just the presentation choice
+  // for the normal `snooply` run. --verbose prints the same detailed
+  // breakdown the CLI always used to show, per workspace; without it, the
+  // terminal only gets the final, user-facing result and the React popup
+  // carries the detailed experience.
+  if (verbose) {
+    for (const ws of workspaces) {
+      if (showWorkspaceLabels) {
+        console.log(ws.label.toUpperCase() + "\n");
+      }
+
+      console.log("Snooply found your dependencies:\n");
+
+      for (const dependency of ws.dependencies) {
+        console.log(`• ${dependency}`);
+      }
+
+      console.log("\nSnooply found usage:\n");
+
+      for (const [dependency, used] of Object.entries(ws.usage)) {
+        const display = formatUsageForDisplay(used);
+        console.log(`• ${dependency}: ${display || "not detected"}`);
+      }
+
+      console.log("\n" + "=".repeat(40) + "\n");
+    }
   }
 
-  console.log("\nSnooply is checking your source files...\n");
-
-  console.log("Snooply found usage:\n");
-
-  for (const [dependency, used] of Object.entries(usage)) {
-    const display = formatUsageForDisplay(used);
-    console.log(`• ${dependency}: ${display || "not detected"}`);
+  const flaggedItems = [];
+  for (const ws of workspaces) {
+    flaggedItems.push(
+      ...ws.recommendations.map((item) => ({ ...item, kind: "WORTH_LOOKING_AT", workspace: ws.label })),
+      ...ws.unused.map((item) => ({ ...item, kind: "UNUSED", workspace: ws.label }))
+    );
   }
-
-  console.log("\n" + "=".repeat(40) + "\n");
-
-  const flaggedItems = [
-    ...recommendations.map((item) => ({ ...item, kind: "WORTH_LOOKING_AT" })),
-    ...unused.map((item) => ({ ...item, kind: "UNUSED" })),
-  ];
 
   if (flaggedItems.length === 0) {
     console.log("🐾 Snooply took a little look...");
     console.log("Everything looks pretty reasonable! ♡");
-  } else if (flaggedItems.length === 1) {
-    console.log("🐾 Snooply found something!");
   } else {
-    console.log(`🐾 Snooply found ${flaggedItems.length} things!`);
+    const noun = flaggedItems.length === 1 ? "thing" : "things";
+    console.log(`🐾 Snooply found ${flaggedItems.length} ${noun} worth checking.\n`);
+
+    let currentLabel = null;
+
+    for (const item of flaggedItems) {
+      if (showWorkspaceLabels && item.workspace !== currentLabel) {
+        currentLabel = item.workspace;
+        console.log(currentLabel.toUpperCase());
+      }
+
+      console.log(`• ${item.dependency}`);
+      console.log(`  ${item.reason}`);
+      console.log(`  ${item.suggestion}`);
+      console.log("");
+    }
   }
 
-  await showReactPopup(flaggedItems, dependencies, usage);
+  // The popup UI (app.jsx, untouched) only understands one flat dependency
+  // list/usage map — when there's more than one workspace, dependency names
+  // are suffixed with their workspace so cards and the "see all
+  // dependencies" view can't collide or look cross-attributed, without
+  // requiring any change to the popup itself.
+  const popupItems = showWorkspaceLabels
+    ? flaggedItems.map((item) => ({ ...item, dependency: `${item.dependency} (${item.workspace})` }))
+    : flaggedItems;
+
+  const popupDependencies = new Set();
+  const popupUsage = {};
+
+  for (const ws of workspaces) {
+    for (const dependency of ws.dependencies) {
+      const key = showWorkspaceLabels ? `${dependency} (${ws.label})` : dependency;
+      popupDependencies.add(key);
+      popupUsage[key] = ws.usage[dependency];
+    }
+  }
+
+  await showReactPopup(popupItems, popupDependencies, popupUsage);
 }
 
 main().catch(() => {
