@@ -56,9 +56,6 @@ body {
   perspective: 1000px;
 }
 
-/* --- Popup card: dark glass floating above the desktop ---
-   Fixed size always - it never grows or shrinks. Whatever view is
-   showing scrolls inside .popup-scroll instead. */
 .popup-card {
   width: 100%;
   max-width: 360px;
