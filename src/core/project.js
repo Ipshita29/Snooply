@@ -25,6 +25,10 @@ const IGNORED_DIRECTORIES = new Set([
   "out",
   ".gradle",
   "bin",
+  // Go-specific: vendored copies of dependencies and scratch output -
+  // not the project's own source
+  "vendor",
+  "tmp",
 ]);
 
 // Walk a directory tree, calling `visit(fullPath, name)` for every

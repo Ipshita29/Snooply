@@ -31,6 +31,13 @@ const PACKAGE_MANAGERS = [
     // Same reasoning as Maven - removing a Gradle dependency means
     // editing the build file, there's no safe CLI equivalent to offer.
   },
+  {
+    id: "go",
+    manifestFiles: ["go.mod"],
+    // Removing a Go dependency means editing go.mod (and usually
+    // running `go mod tidy`, which Snooply won't execute) - no safe
+    // one-line command to offer here either.
+  },
 ];
 
 // Manifest filenames Snooply knows how to recognize a workspace by
@@ -239,6 +246,47 @@ function readGradleManifest(root) {
   return { dependencies, devDependencyNames: new Set() };
 }
 
+// Read `require` entries from a go.mod file - both the single-line
+// and grouped block forms. Version and "// indirect" comments are
+// dropped; only the module path (the dependency identity) is kept.
+function parseGoMod(content) {
+  const dependencies = new Set();
+
+  const blockPattern = /require\s*\(([\s\S]*?)\)/g;
+  let blockMatch;
+  while ((blockMatch = blockPattern.exec(content))) {
+    for (const rawLine of blockMatch[1].split("\n")) {
+      const line = rawLine.split("//")[0].trim();
+      const match = line.match(/^(\S+)\s+v\S+/);
+      if (match) {
+        dependencies.add(match[1]);
+      }
+    }
+  }
+
+  // Single-line requires live outside any require(...) block
+  const withoutBlocks = content.replace(/require\s*\([\s\S]*?\)/g, "");
+  for (const rawLine of withoutBlocks.split("\n")) {
+    const line = rawLine.split("//")[0].trim();
+    const match = line.match(/^require\s+(\S+)\s+v\S+/);
+    if (match) {
+      dependencies.add(match[1]);
+    }
+  }
+
+  return dependencies;
+}
+
+function readGoManifest(root) {
+  const goModPath = path.join(root, "go.mod");
+  if (!fs.existsSync(goModPath)) {
+    throw new Error(`No go.mod found at ${root}`);
+  }
+
+  const dependencies = parseGoMod(fs.readFileSync(goModPath, "utf-8"));
+  return { dependencies, devDependencyNames: new Set() };
+}
+
 // Read every manifest present in a workspace root and merge them.
 // A workspace is usually just one ecosystem, but this doesn't assume
 // that - an npm and a Python manifest side by side both get picked up.
@@ -288,6 +336,15 @@ function readManifest(root) {
     }
   }
 
+  if (fs.existsSync(path.join(root, "go.mod"))) {
+    const go = readGoManifest(root);
+    found = true;
+    for (const dep of go.dependencies) {
+      dependencies.add(dep);
+      packageManagers[dep] = "go";
+    }
+  }
+
   if (!found) {
     throw new Error(`No package manifest found at ${root}`);
   }
@@ -301,6 +358,7 @@ module.exports = {
   readPythonManifest,
   readMavenManifest,
   readGradleManifest,
+  readGoManifest,
   readManifest,
   uninstallCommandFor,
   installCommandFor,
