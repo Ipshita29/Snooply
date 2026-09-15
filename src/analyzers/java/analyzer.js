@@ -38,24 +38,34 @@ function isWithinNamespace(importPath, namespace) {
   return importPath === namespace || importPath.startsWith(namespace + ".");
 }
 
-// Match an imported namespace back to a declared dependency.
-// Tries the curated mapping first, then falls back to the dependency's
-// own groupId - which is often (not always) the real import prefix.
-function resolveTrackedPackage(importPath, dependencyCoordinates) {
+// Match an imported namespace back to every declared dependency it
+// could plausibly belong to. Tries the curated mapping first, then
+// falls back to the dependency's own groupId - which is often (not
+// always) the real import prefix.
+//
+// More than one dependency can legitimately share a namespace (e.g.
+// spring-boot-starter-web and spring-context both live under
+// org.springframework) - when that happens, credit all of them rather
+// than guessing which one "owns" the import. A false "used" here is
+// safer than a false "unused" for a dependency that's actually in use.
+function resolveTrackedPackages(importPath, dependencyCoordinates) {
+  const matches = [];
+
   for (const coordinate of dependencyCoordinates) {
     const { groupId, artifactId } = splitCoordinate(coordinate);
 
     const curated = ARTIFACT_TO_NAMESPACE[artifactId];
     if (curated && isWithinNamespace(importPath, curated)) {
-      return coordinate;
+      matches.push(coordinate);
+      continue;
     }
 
     if (groupId && isWithinNamespace(importPath, groupId)) {
-      return coordinate;
+      matches.push(coordinate);
     }
   }
 
-  return null;
+  return matches;
 }
 
 // Strip comments so "// import fake.Foo;" isn't mistaken for a real one
@@ -88,16 +98,11 @@ function analyzeFile(code, dependencyCoordinates, usage) {
       continue; // standard library - never an external dependency
     }
 
-    const coordinate = resolveTrackedPackage(importPath, dependencyCoordinates);
-    if (!coordinate) {
-      continue;
-    }
+    const coordinates = resolveTrackedPackages(importPath, dependencyCoordinates);
+    const evidence = isWildcard ? "*" : importPath.split(".").pop();
 
-    if (isWildcard) {
-      usage[coordinate].add("*");
-    } else {
-      const segments = importPath.split(".");
-      usage[coordinate].add(segments[segments.length - 1]);
+    for (const coordinate of coordinates) {
+      usage[coordinate].add(evidence);
     }
   }
 }

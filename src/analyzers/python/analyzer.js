@@ -22,6 +22,8 @@ const IMPORT_TO_DISTRIBUTION = {
   bs4: "beautifulsoup4",
   PIL: "Pillow",
   sklearn: "scikit-learn",
+  cv2: "opencv-python",
+  yaml: "PyYAML",
 };
 
 // A practical (not exhaustive) list of Python standard-library

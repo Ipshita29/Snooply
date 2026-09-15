@@ -75,10 +75,25 @@ function isStandardLibrary(importPath) {
   return !importPath.split("/")[0].includes(".");
 }
 
+// A Go module major-version suffix (/v2, /v3, ...) - v1 has none.
+// A module path with this suffix is a distinct module identity, not a
+// subpackage of the unsuffixed path.
+const MAJOR_VERSION_SEGMENT = /^v([2-9]|[1-9][0-9]+)$/;
+
 // Is `importPath` the given path, or a subpackage of it?
-// ("github.com/example/foo" must not match "github.com/example/foobar")
+// ("github.com/example/foo" must not match "github.com/example/foobar",
+// and must not match "github.com/example/foo/v2/..." either - that's
+// a different module unless the dependency itself declares that /v2)
 function isWithinPath(importPath, prefix) {
-  return importPath === prefix || importPath.startsWith(prefix + "/");
+  if (importPath === prefix) {
+    return true;
+  }
+  if (!importPath.startsWith(prefix + "/")) {
+    return false;
+  }
+
+  const nextSegment = importPath.slice(prefix.length + 1).split("/")[0];
+  return !MAJOR_VERSION_SEGMENT.test(nextSegment);
 }
 
 // Match an imported package back to the declared module that owns it

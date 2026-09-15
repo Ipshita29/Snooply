@@ -192,6 +192,18 @@ function analyzeFile(code, dependencies, usage, parserPlugins) {
       return;
     }
 
+    // A bare `require("x")` or `import("x")` with no assignment and
+    // nothing chained on it - e.g. a side-effect require, or a dynamic
+    // import whose result is only awaited (not stored). Without this,
+    // that reference is invisible to the pass above.
+    if (isRequireCall(node) || isDynamicImportCall(node)) {
+      const pkg = resolveTrackedPackage(node.arguments[0]?.value, dependencies);
+      if (pkg) {
+        usage[pkg].add("default");
+      }
+      return;
+    }
+
     if ((node.type === "JSXElement" || node.type === "JSXFragment") && usage.react) {
       // JSX counts as React usage even without `import React`
       usage.react.add("JSX");
