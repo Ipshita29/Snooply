@@ -330,6 +330,8 @@ async function analyzeUsage(projectPath, dependencies, excludedDirs = new Set())
   // Which files use each dependency, and what was found in each one
   // (feeds the "where it was found" detail view)
   const usageByFile = {};
+  // Files that failed to parse - only surfaced in --verbose
+  const skippedFiles = [];
 
   for (const dependency of dependencies) {
     usage[dependency] = new Set();
@@ -349,6 +351,7 @@ async function analyzeUsage(projectPath, dependencies, excludedDirs = new Set())
       analyzeFile(code, dependencies, fileUsage);
     } catch (error) {
       // Skip files that fail to parse
+      skippedFiles.push(filePath);
       continue;
     }
 
@@ -367,7 +370,7 @@ async function analyzeUsage(projectPath, dependencies, excludedDirs = new Set())
     }
   }
 
-  return { usage, usageByFile, files };
+  return { usage, usageByFile, files, skippedFiles };
 }
 
 // --- Recommendation engine ---
@@ -552,6 +555,67 @@ function buildResults(usage, devDependencyNames) {
   }
 
   return { recommendations, unused };
+}
+
+// --- Verbose CLI output ---
+// Displays the same analysis the popup uses, just in more detail.
+// No extra analysis happens here - it only prints existing data.
+
+// Print how much each dependency was used, and where
+function printDependencyUsage(dependencies, usageByFile, root) {
+  console.log("DEPENDENCY USAGE");
+  console.log("-".repeat(24) + "\n");
+
+  for (const dependency of dependencies) {
+    const files = usageByFile[dependency] || [];
+    console.log(dependency);
+    console.log(`  ${files.length} file${files.length === 1 ? "" : "s"}`);
+
+    files.forEach((entry, i) => {
+      const branch = i === files.length - 1 ? "└─" : "├─";
+      console.log(`  ${branch} ${path.relative(root, entry.file)}`);
+    });
+
+    console.log("");
+  }
+}
+
+// Print what the recommendation engine flagged
+function printRecommendations(recommendations, unused) {
+  console.log("RECOMMENDATIONS");
+  console.log("-".repeat(24) + "\n");
+
+  if (recommendations.length === 0 && unused.length === 0) {
+    console.log("Nothing flagged.\n");
+    return;
+  }
+
+  for (const item of unused) {
+    console.log(item.dependency);
+    console.log("  → unused\n");
+  }
+
+  for (const item of recommendations) {
+    console.log(item.dependency);
+    console.log("  → known alternative");
+    if (item.suggestedPackages.length > 0) {
+      console.log(`  → ${item.used.join(", ")} → ${item.suggestedPackages.join(", ")}`);
+    }
+    console.log("");
+  }
+}
+
+// Print files that couldn't be parsed, if any
+function printSkippedFiles(skippedFiles, root) {
+  if (skippedFiles.length === 0) {
+    return;
+  }
+
+  console.log("Could not parse:");
+  for (const file of skippedFiles) {
+    console.log(`  ${path.relative(root, file)}`);
+  }
+  console.log("");
 }
 
 // --- Popup server ---
@@ -797,7 +861,7 @@ async function main() {
     );
 
     // Find package usage
-    const { usage, usageByFile, files } = await analyzeUsage(root, dependencies, excludedDirs);
+    const { usage, usageByFile, files, skippedFiles } = await analyzeUsage(root, dependencies, excludedDirs);
     const { recommendations, unused } = buildResults(usage, devDependencyNames);
 
     workspaces.push({
@@ -807,6 +871,7 @@ async function main() {
       usage,
       usageByFile,
       files,
+      skippedFiles,
       recommendations,
       unused,
     });
@@ -819,26 +884,42 @@ async function main() {
   // Detailed breakdown, only shown with --verbose
   // (normal output stays clean, the popup shows the details)
   if (verbose) {
-    for (const ws of workspaces) {
-      if (showWorkspaceLabels) {
+    console.log("🐾 Snooply is snooping around...\n");
+
+    console.log("PROJECT");
+    console.log(path.basename(projectPath) + "/\n");
+
+    if (workspaces.length === 0) {
+      console.log("No readable package.json found.\n");
+    } else if (workspaces.length === 1) {
+      const ws = workspaces[0];
+      console.log("DEPENDENCIES");
+      console.log(`${ws.dependencies.size}\n`);
+      console.log("SOURCE FILES");
+      console.log(`${ws.files.length}\n`);
+
+      printDependencyUsage(ws.dependencies, ws.usageByFile, ws.root);
+      printRecommendations(ws.recommendations, ws.unused);
+      printSkippedFiles(ws.skippedFiles, ws.root);
+    } else {
+      console.log("PACKAGES");
+      console.log("-".repeat(24) + "\n");
+
+      for (const ws of workspaces) {
+        console.log(`${ws.label}/`);
+        console.log(`  dependencies: ${ws.dependencies.size}`);
+        console.log(`  source files: ${ws.files.length}\n`);
+      }
+
+      for (const ws of workspaces) {
         console.log(ws.label.toUpperCase() + "\n");
+        printDependencyUsage(ws.dependencies, ws.usageByFile, ws.root);
+        printRecommendations(ws.recommendations, ws.unused);
+        printSkippedFiles(ws.skippedFiles, ws.root);
       }
-
-      console.log("Snooply found your dependencies:\n");
-
-      for (const dependency of ws.dependencies) {
-        console.log(`• ${dependency}`);
-      }
-
-      console.log("\nSnooply found usage:\n");
-
-      for (const [dependency, used] of Object.entries(ws.usage)) {
-        const display = formatUsageForDisplay(used);
-        console.log(`• ${dependency}: ${display || "not detected"}`);
-      }
-
-      console.log("\n" + "=".repeat(40) + "\n");
     }
+
+    console.log("-".repeat(40) + "\n");
   }
 
   const flaggedItems = [];
