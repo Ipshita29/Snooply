@@ -2,13 +2,13 @@
 // workspace, runs them, and combines their results into the shape the
 // rest of Snooply (recommendations, CLI, popup) already expects.
 //
-// Only the JavaScript analyzer exists today, so this always runs
-// exactly one analyzer - but a workspace could have more than one in
-// the future (e.g. a JS frontend and a Python backend side by side).
+// A workspace can have more than one analyzer apply - e.g. a project
+// with both .jsx and .tsx files runs both and their results merge.
 
 const javascriptAnalyzer = require("../analyzers/javascript/analyzer");
+const typescriptAnalyzer = require("../analyzers/typescript/analyzer");
 
-const ANALYZERS = [javascriptAnalyzer];
+const ANALYZERS = [javascriptAnalyzer, typescriptAnalyzer];
 
 // Which registered analyzers apply to this workspace
 function selectAnalyzers(root) {
