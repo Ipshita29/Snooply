@@ -5,7 +5,6 @@
 // is identical, so it lives here once instead of being duplicated.
 
 const fs = require("fs");
-const path = require("path");
 const parser = require("@babel/parser");
 const { findSourceFiles } = require("../../core/project");
 
@@ -204,10 +203,12 @@ function analyzeFile(code, dependencies, usage, parserPlugins) {
 // receives the file path so a language can vary plugins per file
 // (TypeScript needs this: .tsx needs the jsx plugin, plain .ts must
 // not enable it, since TS's `<Type>value` cast syntax collides with it).
-function createBabelAnalyzer({ name, extensions, getParserPlugins }) {
+// `shouldAnalyze`, if given, filters out matched files that shouldn't
+// actually be treated as source (e.g. TypeScript's .d.ts files).
+function createBabelAnalyzer({ name, extensions, getParserPlugins, shouldAnalyze = () => true }) {
   // Scan a workspace's source files and collect dependency usage
   async function analyze(root, dependencies, excludedDirs = new Set()) {
-    const files = findSourceFiles(root, extensions, excludedDirs);
+    const files = findSourceFiles(root, extensions, excludedDirs).filter(shouldAnalyze);
     const usage = {};
     // Which files use each dependency, and what was found in each one
     const usageByFile = {};
@@ -254,9 +255,9 @@ function createBabelAnalyzer({ name, extensions, getParserPlugins }) {
     return { language: name, sourceFiles: files, usage, usageByFile, skippedFiles };
   }
 
-  // This analyzer applies to any workspace npm can see (has a package.json)
-  function canAnalyze(root) {
-    return fs.existsSync(path.join(root, "package.json"));
+  // This analyzer applies if the workspace actually has matching files
+  function canAnalyze(root, extensionsPresent) {
+    return extensions.some((ext) => extensionsPresent.has(ext));
   }
 
   return { name, extensions, canAnalyze, analyze };

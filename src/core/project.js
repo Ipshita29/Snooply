@@ -16,16 +16,16 @@ const IGNORED_DIRECTORIES = new Set([
   ".cache",
 ]);
 
-// Find files under a directory matching the given extensions
+// Walk a directory tree, calling `visit(fullPath, name)` for every
+// regular file found. Shared by anything that needs to look at every
+// file once - which extensions to filter by is up to the caller.
 // (excludedDirs skips other workspaces nested inside this one)
-function findSourceFiles(directory, extensions, excludedDirs = new Set()) {
-  const files = [];
-
+function walkFiles(directory, excludedDirs, visit) {
   let entries;
   try {
     entries = fs.readdirSync(directory);
   } catch (error) {
-    return files;
+    return;
   }
 
   for (const item of entries) {
@@ -47,13 +47,40 @@ function findSourceFiles(directory, extensions, excludedDirs = new Set()) {
     }
 
     if (stats.isDirectory()) {
-      files.push(...findSourceFiles(fullPath, extensions, excludedDirs));
-    } else if (extensions.some((ext) => item.endsWith(ext))) {
-      files.push(fullPath);
+      walkFiles(fullPath, excludedDirs, visit);
+    } else {
+      visit(fullPath, item);
     }
   }
+}
+
+// Find files under a directory matching the given extensions
+function findSourceFiles(directory, extensions, excludedDirs = new Set()) {
+  const files = [];
+
+  walkFiles(directory, excludedDirs, (fullPath, name) => {
+    if (extensions.some((ext) => name.endsWith(ext))) {
+      files.push(fullPath);
+    }
+  });
 
   return files;
+}
+
+// Find every file extension present under a directory - used to decide
+// which language analyzers are actually worth running, without each
+// one having to walk the whole tree itself just to check.
+function findExtensionsPresent(directory, excludedDirs = new Set()) {
+  const extensions = new Set();
+
+  walkFiles(directory, excludedDirs, (fullPath, name) => {
+    const ext = path.extname(name);
+    if (ext) {
+      extensions.add(ext);
+    }
+  });
+
+  return extensions;
 }
 
 // Find every workspace root - anywhere with a package manifest
@@ -95,6 +122,7 @@ function getWorkspaceLabel(root, projectPath) {
 module.exports = {
   IGNORED_DIRECTORIES,
   findSourceFiles,
+  findExtensionsPresent,
   findWorkspaceRoots,
   getWorkspaceLabel,
 };

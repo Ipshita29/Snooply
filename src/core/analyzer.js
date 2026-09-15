@@ -5,19 +5,24 @@
 // A workspace can have more than one analyzer apply - e.g. a project
 // with both .jsx and .tsx files runs both and their results merge.
 
+const { findExtensionsPresent } = require("./project");
 const javascriptAnalyzer = require("../analyzers/javascript/analyzer");
 const typescriptAnalyzer = require("../analyzers/typescript/analyzer");
 
 const ANALYZERS = [javascriptAnalyzer, typescriptAnalyzer];
 
-// Which registered analyzers apply to this workspace
-function selectAnalyzers(root) {
-  return ANALYZERS.filter((analyzer) => analyzer.canAnalyze(root));
+// Which registered analyzers apply to this workspace - based on which
+// file extensions actually show up there, not just "has a package.json".
+// One scan decides this for every analyzer, instead of each analyzer
+// walking the tree itself to find out whether it's needed.
+function selectAnalyzers(root, excludedDirs = new Set()) {
+  const extensionsPresent = findExtensionsPresent(root, excludedDirs);
+  return ANALYZERS.filter((analyzer) => analyzer.canAnalyze(root, extensionsPresent));
 }
 
 // Run every matching analyzer and merge their usage data into one result
 async function analyzeWorkspace(root, dependencies, excludedDirs = new Set()) {
-  const analyzers = selectAnalyzers(root);
+  const analyzers = selectAnalyzers(root, excludedDirs);
 
   const languages = [];
   const files = [];
