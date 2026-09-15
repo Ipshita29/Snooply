@@ -176,11 +176,50 @@
     );
   }
 
-  // Show the full details for one dependency
+  // Button that copies text to the clipboard, briefly says "Copied"
+  function CopyCommandButton(props) {
+    const [copied, setCopied] = React.useState(false);
+
+    function handleCopy() {
+      navigator.clipboard
+        .writeText(props.command)
+        .then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        })
+        .catch(() => {});
+    }
+
+    return h(
+      "button",
+      { className: "copy-btn", onClick: handleCopy },
+      copied ? "Copied" : "Copy command"
+    );
+  }
+
+  // Show the full evidence Snooply has for one dependency - why it was
+  // flagged, where it was found, what was actually checked, and what
+  // to do next. Everything here comes from the analyzer's own output;
+  // this view only presents it.
+  // One labeled command line: a pill with the command plus a copy button
+  function CommandRow(props) {
+    return h(
+      "div",
+      { className: "action-row" },
+      h("code", { className: "uninstall-pill", style: { flex: "1 1 auto" } }, props.command),
+      h(CopyCommandButton, { command: props.command })
+    );
+  }
+
   function ExploreView(props) {
     const item = props.item;
-    const hasUsage = item.used && item.used.length > 0;
     const isUnused = item.kind === "UNUSED";
+    const where = item.where || [];
+    const baseName = baseDependencyName(item.dependency);
+    const uninstallCommand = `npm uninstall ${baseName}`;
+    const installCommand = item.suggestedPackages && item.suggestedPackages.length > 0
+      ? `npm install ${item.suggestedPackages.join(" ")}`
+      : null;
 
     return h(
       "div",
@@ -193,23 +232,77 @@
         h("span", { className: "rec-name", style: { fontSize: 16 } }, item.dependency),
         h(Badge, { item })
       ),
-      hasUsage &&
-        h(
-          React.Fragment,
-          null,
-          h("p", { className: "usage-label" }, "You're only using:"),
-          h(
-            "ul",
-            { className: "usage-list" },
-            item.used.map((fn, i) => h("li", { key: fn + i }, h("span", { className: "tick" }, "✓"), fn))
-          )
-        ),
-      h("p", { className: "detail-label" }, "Why Snooply noticed"),
+
+      h("p", { className: "detail-label" }, "Why Snooply flagged this"),
       h("p", { className: "detail-text" }, item.reason),
-      h("p", { className: "detail-label" }, "Suggestion"),
+
+      h("p", { className: "detail-label" }, "Where it was found"),
+      where.length > 0
+        ? h(
+            "ul",
+            { className: "where-list" },
+            where.map((entry, i) =>
+              h(
+                "li",
+                { key: entry.file + i, className: "where-row" },
+                h("span", { className: "where-file" }, entry.file),
+                entry.used && h("span", { className: "where-used" }, entry.used)
+              )
+            )
+          )
+        : h("p", { className: "detail-text muted" }, "No usage found."),
+
+      h("p", { className: "detail-label" }, "What Snooply checked"),
+      h(
+        "ul",
+        { className: "checked-list" },
+        h("li", null, `${item.filesChecked} source file${item.filesChecked === 1 ? "" : "s"} scanned (.js / .jsx)`),
+        h(
+          "li",
+          null,
+          `${item.dependenciesChecked} dependenc${item.dependenciesChecked === 1 ? "y" : "ies"} checked against package.json: `,
+          h("span", { className: "checked-deps" }, (item.dependenciesList || []).join(", "))
+        ),
+        h("li", null, "Usage detected via imports, requires, and member access (e.g. ", h("code", null, "pkg.method()"), ")")
+      ),
+
+      h("p", { className: "detail-label" }, "Recommendation"),
       h("p", { className: "detail-text" }, renderWithCode(item.suggestion, "d" + item.dependency)),
-      isUnused &&
-        h("code", { className: "uninstall-pill", style: { marginTop: 14, display: "inline-block" } }, `npm uninstall ${baseDependencyName(item.dependency)}`)
+
+      h("p", { className: "detail-label" }, "Action"),
+      isUnused
+        ? h(CommandRow, { command: uninstallCommand })
+        : h(
+            React.Fragment,
+            null,
+            installCommand &&
+              h(
+                React.Fragment,
+                null,
+                h("p", { className: "action-step" }, "1. Install the alternative"),
+                h(CommandRow, { command: installCommand })
+              ),
+            where.length > 0 &&
+              h(
+                React.Fragment,
+                null,
+                h("p", { className: "action-step" }, `2. Update where ${item.used ? item.used.join(", ") : "it"} is used`),
+                h(
+                  "ul",
+                  { className: "where-list" },
+                  where.map((entry, i) =>
+                    h(
+                      "li",
+                      { key: "u" + entry.file + i, className: "where-row" },
+                      h("span", { className: "where-file" }, entry.file),
+                      entry.used && h("span", { className: "where-used" }, entry.used)
+                    )
+                  )
+                )
+              ),
+            h("p", { className: "action-step" }, "3. Remove the old package once nothing else uses it"),
+            h(CommandRow, { command: uninstallCommand })
+          )
     );
   }
 

@@ -6,7 +6,6 @@ const readline = require("readline");
 const http = require("http");
 const { spawn } = require("child_process");
 const parser = require("@babel/parser");
-const { analyzeReachability } = require("./graph");
 
 // --- Loading animation ---
 // Rotates a single line of status text while Snooply works.
@@ -209,7 +208,7 @@ function isDynamicImportCall(node) {
   return node?.type === "CallExpression" && node.callee.type === "Import";
 }
 
-// Parse a file and find package + local imports
+// Parse a file and find package usage
 function analyzeFile(code, dependencies, usage) {
   const ast = parser.parse(code, {
     sourceType: "unambiguous",
@@ -219,27 +218,11 @@ function analyzeFile(code, dependencies, usage) {
   // Track which local name maps to which package
   // (e.g. `debounce` -> lodash, so `debounce()` counts as usage)
   const bindings = new Map();
-  // Local file imports, for the reachability graph
-  const localImportSpecifiers = [];
 
   // Find imports and requires
   walkAst(ast.program, (node) => {
-    if (isRequireCall(node) || isDynamicImportCall(node)) {
-      const arg = node.arguments[0];
-      if (arg?.type === "StringLiteral" && (arg.value.startsWith("./") || arg.value.startsWith("../"))) {
-        localImportSpecifiers.push(arg.value);
-      }
-      // No return here - the require() case below still needs this node
-    }
-
     if (node.type === "ImportDeclaration") {
       const source = node.source.value;
-
-      if (source.startsWith("./") || source.startsWith("../")) {
-        localImportSpecifiers.push(source);
-        return;
-      }
-
       const pkg = resolveTrackedPackage(source, dependencies);
       if (!pkg) {
         return;
@@ -338,21 +321,19 @@ function analyzeFile(code, dependencies, usage) {
     }
   });
 
-  return { localImportSpecifiers };
 }
 
 // Scan all source files and collect usage
 async function analyzeUsage(projectPath, dependencies, excludedDirs = new Set()) {
   const files = getJavaScriptFiles(projectPath, excludedDirs);
   const usage = {};
-  // Which files use each dependency, and each file's local imports
-  // (this feeds the reachability graph)
-  const usageFiles = {};
-  const localImportsByFile = {};
+  // Which files use each dependency, and what was found in each one
+  // (feeds the "where it was found" detail view)
+  const usageByFile = {};
 
   for (const dependency of dependencies) {
     usage[dependency] = new Set();
-    usageFiles[dependency] = new Set();
+    usageByFile[dependency] = [];
   }
 
   for (let i = 0; i < files.length; i++) {
@@ -364,22 +345,19 @@ async function analyzeUsage(projectPath, dependencies, excludedDirs = new Set())
       fileUsage[dependency] = new Set();
     }
 
-    let result;
     try {
-      result = analyzeFile(code, dependencies, fileUsage);
+      analyzeFile(code, dependencies, fileUsage);
     } catch (error) {
       // Skip files that fail to parse
       continue;
     }
-
-    localImportsByFile[filePath] = result.localImportSpecifiers;
 
     for (const dependency of dependencies) {
       for (const evidence of fileUsage[dependency]) {
         usage[dependency].add(evidence);
       }
       if (fileUsage[dependency].size > 0) {
-        usageFiles[dependency].add(filePath);
+        usageByFile[dependency].push({ file: filePath, used: [...fileUsage[dependency]] });
       }
     }
 
@@ -389,7 +367,7 @@ async function analyzeUsage(projectPath, dependencies, excludedDirs = new Set())
     }
   }
 
-  return { usage, usageFiles, files, localImportsByFile };
+  return { usage, usageByFile, files };
 }
 
 // --- Recommendation engine ---
@@ -527,7 +505,8 @@ function evaluateDependency(name, used, isDevDependency) {
   };
 }
 
-// Turn raw usage into readable text for the CLI
+// Turn raw usage into readable text (used by the CLI, and by the
+// popup's per-file "where it was found" evidence)
 function formatUsageForDisplay(used) {
   const named = [...used].filter((name) => !NON_SPECIFIC_MARKERS.has(name));
   const labels = [...named];
@@ -818,36 +797,18 @@ async function main() {
     );
 
     // Find package usage
-    const { usage, usageFiles, files, localImportsByFile } = await analyzeUsage(root, dependencies, excludedDirs);
+    const { usage, usageByFile, files } = await analyzeUsage(root, dependencies, excludedDirs);
     const { recommendations, unused } = buildResults(usage, devDependencyNames);
-
-    // Trace which usage is in reachable files
-    // (extra evidence only - doesn't change recommendations)
-    const reachability = analyzeReachability({ root, scannedFiles: files, localImportsByFile, packageJson });
-
-    const usageReachability = {};
-    for (const dependency of dependencies) {
-      const allUsageFiles = [...usageFiles[dependency]];
-      usageReachability[dependency] = {
-        usageFiles: allUsageFiles,
-        reachableUsageFiles: reachability.confident
-          ? allUsageFiles.filter((file) => reachability.reachableFiles.has(file))
-          : allUsageFiles,
-        unreachableUsageFiles: reachability.confident
-          ? allUsageFiles.filter((file) => !reachability.reachableFiles.has(file))
-          : [],
-      };
-    }
 
     workspaces.push({
       label: getWorkspaceLabel(root, projectPath),
       root,
       dependencies,
       usage,
+      usageByFile,
+      files,
       recommendations,
       unused,
-      reachability,
-      usageReachability,
     });
   }
 
@@ -876,35 +837,34 @@ async function main() {
         console.log(`• ${dependency}: ${display || "not detected"}`);
       }
 
-      if (ws.reachability.confident) {
-        const entryLabels = ws.reachability.entryPoints.map((file) => path.relative(ws.root, file));
-        console.log(`\nEntry point(s): ${entryLabels.join(", ")}`);
-        console.log(`Reachable files: ${ws.reachability.reachableFiles.size}`);
-
-        const unreachableOnly = Object.entries(ws.usageReachability).filter(
-          ([, info]) => info.usageFiles.length > 0 && info.reachableUsageFiles.length === 0
-        );
-
-        if (unreachableOnly.length > 0) {
-          console.log("\nUsed only by unreachable source files:");
-          for (const [dependency, info] of unreachableOnly) {
-            const fileLabels = info.unreachableUsageFiles.map((file) => path.relative(ws.root, file));
-            console.log(`• ${dependency}: ${fileLabels.join(", ")}`);
-          }
-        }
-      } else {
-        console.log("\nEntry point: not confidently detected — reachability analysis skipped.");
-      }
-
       console.log("\n" + "=".repeat(40) + "\n");
     }
   }
 
   const flaggedItems = [];
   for (const ws of workspaces) {
+    // Attach real, already-known evidence for the detail view -
+    // which files it showed up in, and what was checked. Nothing here
+    // is invented; it's just the analyzer's own data, reshaped.
+    const withEvidence = (item, kind) => {
+      const fileEntries = ws.usageByFile[item.dependency] || [];
+      return {
+        ...item,
+        kind,
+        workspace: ws.label,
+        where: fileEntries.map((entry) => ({
+          file: path.relative(ws.root, entry.file),
+          used: formatUsageForDisplay(new Set(entry.used)),
+        })),
+        filesChecked: ws.files.length,
+        dependenciesChecked: ws.dependencies.size,
+        dependenciesList: [...ws.dependencies],
+      };
+    };
+
     flaggedItems.push(
-      ...ws.recommendations.map((item) => ({ ...item, kind: "WORTH_LOOKING_AT", workspace: ws.label })),
-      ...ws.unused.map((item) => ({ ...item, kind: "UNUSED", workspace: ws.label }))
+      ...ws.recommendations.map((item) => withEvidence(item, "WORTH_LOOKING_AT")),
+      ...ws.unused.map((item) => withEvidence(item, "UNUSED"))
     );
   }
 
