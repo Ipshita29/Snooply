@@ -171,7 +171,11 @@
         "div",
         { className: "card-actions" + (isUnused ? "" : " only-explore") },
         isUnused &&
-          h("code", { className: "uninstall-pill" }, item.uninstallCommand),
+          h(
+            "code",
+            { className: "uninstall-pill" },
+            item.uninstallCommand || "Remove manually from your build file"
+          ),
         h("button", { className: "explore-btn", onClick: () => props.onExplore(item) }, "Explore", h("span", null, "→"))
       )
     );
@@ -198,8 +202,14 @@
     );
   }
 
-  // One labeled command line: a pill with the command plus a copy button
+  // One labeled command line: a pill with the command plus a copy button.
+  // Some package managers (Maven, Gradle) don't have a safe one-line
+  // removal command - show a plain note instead of guessing one.
   function CommandRow(props) {
+    if (!props.command) {
+      return h("p", { className: "detail-text muted" }, "Remove this manually from your build file.");
+    }
+
     return h(
       "div",
       { className: "action-row" },

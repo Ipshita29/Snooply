@@ -20,6 +20,11 @@ const IGNORED_DIRECTORIES = new Set([
   "__pycache__",
   "venv",
   ".venv",
+  // Java-specific: Maven/Gradle build output, never real source
+  "target",
+  "out",
+  ".gradle",
+  "bin",
 ]);
 
 // Walk a directory tree, calling `visit(fullPath, name)` for every
