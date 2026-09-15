@@ -11,8 +11,9 @@ const typescriptAnalyzer = require("../analyzers/typescript/analyzer");
 const pythonAnalyzer = require("../analyzers/python/analyzer");
 const javaAnalyzer = require("../analyzers/java/analyzer");
 const goAnalyzer = require("../analyzers/go/analyzer");
+const rustAnalyzer = require("../analyzers/rust/analyzer");
 
-const ANALYZERS = [javascriptAnalyzer, typescriptAnalyzer, pythonAnalyzer, javaAnalyzer, goAnalyzer];
+const ANALYZERS = [javascriptAnalyzer, typescriptAnalyzer, pythonAnalyzer, javaAnalyzer, goAnalyzer, rustAnalyzer];
 
 // Which registered analyzers apply to this workspace - based on which
 // file extensions actually show up there, not just "has a package.json".

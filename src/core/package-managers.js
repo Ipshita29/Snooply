@@ -38,6 +38,12 @@ const PACKAGE_MANAGERS = [
     // running `go mod tidy`, which Snooply won't execute) - no safe
     // one-line command to offer here either.
   },
+  {
+    id: "cargo",
+    manifestFiles: ["Cargo.toml"],
+    // Same reasoning as the others - removing a crate means editing
+    // Cargo.toml, there's no safe one-line `cargo` command to offer.
+  },
 ];
 
 // Manifest filenames Snooply knows how to recognize a workspace by
@@ -287,6 +293,66 @@ function readGoManifest(root) {
   return { dependencies, devDependencyNames: new Set() };
 }
 
+// TOML sections that declare Cargo dependencies. Dev and build
+// dependencies are included too - they're still declared dependencies,
+// just usually imported from tests/ or build.rs instead of src/.
+function isCargoDependencySection(section) {
+  return /^(dependencies|dev-dependencies|build-dependencies|target\.[^.]+\.dependencies)$/.test(section);
+}
+
+// Read dependency keys out of a Cargo.toml. The declared dependency
+// identity is always the TOML key on the left of "=" - even for a
+// renamed dependency like `my_json = { package = "serde_json" }`,
+// where the source imports it as `my_json`, not `serde_json`.
+function parseCargoToml(content) {
+  const dependencies = new Set();
+  let inDependencySection = false;
+
+  for (const rawLine of content.split("\n")) {
+    const line = rawLine.split("#")[0].trim();
+    if (!line) {
+      continue;
+    }
+
+    const sectionMatch = line.match(/^\[([^\]]+)\]$/);
+    if (sectionMatch) {
+      const section = sectionMatch[1];
+
+      // [dependencies.some-crate] declares one dependency directly
+      const namedSection = section.match(/^(?:dependencies|dev-dependencies|build-dependencies)\.([A-Za-z0-9_-]+)$/);
+      if (namedSection) {
+        dependencies.add(namedSection[1]);
+        inDependencySection = false;
+        continue;
+      }
+
+      inDependencySection = isCargoDependencySection(section);
+      continue;
+    }
+
+    if (!inDependencySection) {
+      continue;
+    }
+
+    const keyMatch = line.match(/^([A-Za-z0-9_-]+)\s*=/);
+    if (keyMatch) {
+      dependencies.add(keyMatch[1]);
+    }
+  }
+
+  return dependencies;
+}
+
+function readCargoManifest(root) {
+  const cargoPath = path.join(root, "Cargo.toml");
+  if (!fs.existsSync(cargoPath)) {
+    throw new Error(`No Cargo.toml found at ${root}`);
+  }
+
+  const dependencies = parseCargoToml(fs.readFileSync(cargoPath, "utf-8"));
+  return { dependencies, devDependencyNames: new Set() };
+}
+
 // Read every manifest present in a workspace root and merge them.
 // A workspace is usually just one ecosystem, but this doesn't assume
 // that - an npm and a Python manifest side by side both get picked up.
@@ -345,6 +411,15 @@ function readManifest(root) {
     }
   }
 
+  if (fs.existsSync(path.join(root, "Cargo.toml"))) {
+    const cargo = readCargoManifest(root);
+    found = true;
+    for (const dep of cargo.dependencies) {
+      dependencies.add(dep);
+      packageManagers[dep] = "cargo";
+    }
+  }
+
   if (!found) {
     throw new Error(`No package manifest found at ${root}`);
   }
@@ -359,6 +434,7 @@ module.exports = {
   readMavenManifest,
   readGradleManifest,
   readGoManifest,
+  readCargoManifest,
   readManifest,
   uninstallCommandFor,
   installCommandFor,
