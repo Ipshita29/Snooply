@@ -320,7 +320,6 @@ function analyzeFile(code, dependencies, usage) {
       usage.react.add("JSX");
     }
   });
-
 }
 
 // Scan all source files and collect usage
@@ -407,10 +406,6 @@ const FRAMEWORK_PACKAGE_PREFIXES = ["@babel/", "eslint-plugin-", "eslint-config-
 
 function isFrameworkPackage(name) {
   return FRAMEWORK_PACKAGES.has(name) || FRAMEWORK_PACKAGE_PREFIXES.some((prefix) => name.startsWith(prefix));
-}
-
-function formatList(names) {
-  return names.map((n) => `\`${n}\``).join(" and ");
 }
 
 function formatBacktickList(items) {
@@ -502,8 +497,8 @@ function evaluateDependency(name, used, isDevDependency) {
   return {
     status: "KNOWN_ALTERNATIVE",
     used: namedUsage,
-    reason: `You're only using ${formatList(namedUsage)} from \`${name}\`.`,
-    suggestion: `If ${formatList(namedUsage)} ${namedUsage.length === 1 ? "is" : "are"} all you need, consider ${formatBacktickList(alternative.packages)} instead.`,
+    reason: `You're only using ${formatBacktickList(namedUsage)} from \`${name}\`.`,
+    suggestion: `If ${formatBacktickList(namedUsage)} ${namedUsage.length === 1 ? "is" : "are"} all you need, consider ${formatBacktickList(alternative.packages)} instead.`,
     suggestedPackages: alternative.packages,
   };
 }
@@ -561,10 +556,12 @@ function buildResults(usage, devDependencyNames) {
 // Displays the same analysis the popup uses, just in more detail.
 // No extra analysis happens here - it only prints existing data.
 
+const SECTION_DIVIDER = "-".repeat(24);
+
 // Print how much each dependency was used, and where
 function printDependencyUsage(dependencies, usageByFile, root) {
   console.log("DEPENDENCY USAGE");
-  console.log("-".repeat(24) + "\n");
+  console.log(SECTION_DIVIDER + "\n");
 
   for (const dependency of dependencies) {
     const files = usageByFile[dependency] || [];
@@ -583,18 +580,14 @@ function printDependencyUsage(dependencies, usageByFile, root) {
 // Print what the recommendation engine flagged
 function printRecommendations(recommendations, unused) {
   console.log("RECOMMENDATIONS");
-  console.log("-".repeat(24) + "\n");
+  console.log(SECTION_DIVIDER + "\n");
 
   if (recommendations.length === 0 && unused.length === 0) {
     console.log("Nothing flagged.\n");
     return;
   }
 
-  for (const item of unused) {
-    console.log(item.dependency);
-    console.log("  → unused\n");
-  }
-
+  // Same order as normal mode: known alternatives, then unused
   for (const item of recommendations) {
     console.log(item.dependency);
     console.log("  → known alternative");
@@ -602,6 +595,11 @@ function printRecommendations(recommendations, unused) {
       console.log(`  → ${item.used.join(", ")} → ${item.suggestedPackages.join(", ")}`);
     }
     console.log("");
+  }
+
+  for (const item of unused) {
+    console.log(item.dependency);
+    console.log("  → unused\n");
   }
 }
 
@@ -909,7 +907,7 @@ async function main() {
       printSkippedFiles(ws.skippedFiles, ws.root);
     } else {
       console.log("PACKAGES");
-      console.log("-".repeat(24) + "\n");
+      console.log(SECTION_DIVIDER + "\n");
 
       for (const ws of workspaces) {
         console.log(`${ws.label}/`);

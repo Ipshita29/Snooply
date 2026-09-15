@@ -198,10 +198,6 @@
     );
   }
 
-  // Show the full evidence Snooply has for one dependency - why it was
-  // flagged, where it was found, what was actually checked, and what
-  // to do next. Everything here comes from the analyzer's own output;
-  // this view only presents it.
   // One labeled command line: a pill with the command plus a copy button
   function CommandRow(props) {
     return h(
@@ -212,6 +208,27 @@
     );
   }
 
+  // File + evidence list, shared by "Where it was found" and the
+  // "update these files" action step below it
+  function WhereList(props) {
+    return h(
+      "ul",
+      { className: "where-list" },
+      props.where.map((entry, i) =>
+        h(
+          "li",
+          { key: props.keyPrefix + entry.file + i, className: "where-row" },
+          h("span", { className: "where-file" }, entry.file),
+          entry.used && h("span", { className: "where-used" }, entry.used)
+        )
+      )
+    );
+  }
+
+  // Show the full evidence Snooply has for one dependency - why it was
+  // flagged, where it was found, what was actually checked, and what
+  // to do next. Everything here comes from the analyzer's own output;
+  // this view only presents it.
   function ExploreView(props) {
     const item = props.item;
     const isUnused = item.kind === "UNUSED";
@@ -239,18 +256,7 @@
 
       h("p", { className: "detail-label" }, "Where it was found"),
       where.length > 0
-        ? h(
-            "ul",
-            { className: "where-list" },
-            where.map((entry, i) =>
-              h(
-                "li",
-                { key: entry.file + i, className: "where-row" },
-                h("span", { className: "where-file" }, entry.file),
-                entry.used && h("span", { className: "where-used" }, entry.used)
-              )
-            )
-          )
+        ? h(WhereList, { where, keyPrefix: "w" })
         : h("p", { className: "detail-text muted" }, "No usage found."),
 
       h("p", { className: "detail-label" }, "What Snooply checked"),
@@ -287,19 +293,8 @@
               h(
                 React.Fragment,
                 null,
-                h("p", { className: "action-step" }, `2. Update where ${item.used ? item.used.join(", ") : "it"} is used`),
-                h(
-                  "ul",
-                  { className: "where-list" },
-                  where.map((entry, i) =>
-                    h(
-                      "li",
-                      { key: "u" + entry.file + i, className: "where-row" },
-                      h("span", { className: "where-file" }, entry.file),
-                      entry.used && h("span", { className: "where-used" }, entry.used)
-                    )
-                  )
-                )
+                h("p", { className: "action-step" }, `2. Update where ${item.used.join(", ")} is used`),
+                h(WhereList, { where, keyPrefix: "u" })
               ),
             h("p", { className: "action-step" }, "3. Remove the old package once nothing else uses it"),
             h(CommandRow, { command: uninstallCommand })
@@ -500,6 +495,7 @@
             )
       ),
 
+      h(SeeAllRow, { onSeeAll: props.onSeeAll }),
       h(Footer, { version: data.version })
     );
   }
@@ -572,7 +568,7 @@
     } else if (view === "all") {
       body = h(AllDependenciesView, { dependencies: data.dependencies, usage: data.usage, onBack: () => setView("list") });
     } else if (data.verbose) {
-      body = h(VerboseHome, { data, onExplore: goExplore });
+      body = h(VerboseHome, { data, onExplore: goExplore, onSeeAll: () => setView("all") });
     } else if (items.length === 0) {
       body = h(EmptyState, { onSeeAll: () => setView("all"), version: data.version });
     } else {
