@@ -70,10 +70,19 @@ function findSourceFiles(directory, extensions, excludedDirs = new Set()) {
 // Find every file extension present under a directory - used to decide
 // which language analyzers are actually worth running, without each
 // one having to walk the whole tree itself just to check.
+//
+// `.d.ts` is reported as its own thing, not folded into `.ts` - a
+// declaration file isn't real TypeScript source, so a workspace with
+// only .d.ts files shouldn't be enough to select the TypeScript analyzer.
 function findExtensionsPresent(directory, excludedDirs = new Set()) {
   const extensions = new Set();
 
   walkFiles(directory, excludedDirs, (fullPath, name) => {
+    if (name.endsWith(".d.ts")) {
+      extensions.add(".d.ts");
+      return;
+    }
+
     const ext = path.extname(name);
     if (ext) {
       extensions.add(ext);
