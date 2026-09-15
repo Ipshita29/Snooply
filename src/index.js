@@ -7,7 +7,7 @@ const http = require("http");
 const { spawn } = require("child_process");
 
 const { findWorkspaceRoots, getWorkspaceLabel } = require("./core/project");
-const { readNpmManifest } = require("./core/package-managers");
+const { readManifest } = require("./core/package-managers");
 const { analyzeWorkspace } = require("./core/analyzer");
 const { buildResults, formatUsageForDisplay } = require("./core/recommendations");
 
@@ -312,7 +312,7 @@ async function main() {
   const workspaceRoots = findWorkspaceRoots(projectPath);
 
   if (workspaceRoots.length === 0) {
-    console.log("🐾 Snooply couldn't find a package.json here.");
+    console.log("🐾 Snooply couldn't find a package.json, requirements.txt, or pyproject.toml here.");
     process.exitCode = 1;
     return;
   }
@@ -320,7 +320,7 @@ async function main() {
   // Keep the single-package error message exactly as before
   if (workspaceRoots.length === 1) {
     try {
-      readNpmManifest(workspaceRoots[0]);
+      readManifest(workspaceRoots[0]);
     } catch (error) {
       console.log("🐾 Snooply found a package.json here, but couldn't read it (invalid JSON).");
       process.exitCode = 1;
@@ -336,7 +336,7 @@ async function main() {
     // Read the package manifest
     let manifest;
     try {
-      manifest = readNpmManifest(root);
+      manifest = readManifest(root);
     } catch (error) {
       // Skip this workspace, don't stop the whole scan
       continue;

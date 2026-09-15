@@ -8,8 +8,9 @@
 const { findExtensionsPresent } = require("./project");
 const javascriptAnalyzer = require("../analyzers/javascript/analyzer");
 const typescriptAnalyzer = require("../analyzers/typescript/analyzer");
+const pythonAnalyzer = require("../analyzers/python/analyzer");
 
-const ANALYZERS = [javascriptAnalyzer, typescriptAnalyzer];
+const ANALYZERS = [javascriptAnalyzer, typescriptAnalyzer, pythonAnalyzer];
 
 // Which registered analyzers apply to this workspace - based on which
 // file extensions actually show up there, not just "has a package.json".

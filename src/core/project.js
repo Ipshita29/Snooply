@@ -14,6 +14,12 @@ const IGNORED_DIRECTORIES = new Set([
   ".next",
   ".turbo",
   ".cache",
+  // Python-specific: compiled bytecode and virtual environments -
+  // never real application source, and venvs can contain thousands
+  // of vendored files that would otherwise swamp the scan
+  "__pycache__",
+  "venv",
+  ".venv",
 ]);
 
 // Walk a directory tree, calling `visit(fullPath, name)` for every
