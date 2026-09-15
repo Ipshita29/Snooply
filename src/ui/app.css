@@ -1,7 +1,7 @@
 :root {
-  --bg: #080909;
-  --glass: rgba(20, 21, 21, 0.80);
-  --glass-inner: rgba(255, 255, 255, 0.035);
+  --bg: #070707;
+  --glass: rgba(9, 9, 9, 0.8);
+  --glass-inner: rgba(0, 0, 0, 0.035);
   --text: #eeeeeb;
   --text-secondary: #a5a5a0;
   --text-muted: #70716d;
@@ -344,6 +344,83 @@ body {
 .dep-usage { font-size: 12.5px; color: var(--text-secondary); text-align: right; max-width: 60%; }
 
 .empty-state { text-align: center; padding: 4px 2px 2px; }
+
+/* --- Verbose popup --- */
+.verbose-header { display: flex; align-items: center; justify-content: center; gap: 8px; margin: 6px 0 4px; }
+.verbose-badge {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .07em;
+  color: var(--brass);
+  border: 1px solid var(--brass);
+  background: var(--brass-soft);
+  border-radius: 999px;
+  padding: 3px 8px;
+}
+
+.verbose-section { margin-top: 14px; }
+.verbose-section:first-of-type { margin-top: 0; }
+
+.project-name { font-size: 15px; font-weight: 600; color: var(--text); margin: 0; }
+
+.overview-stats { display: flex; gap: 10px; margin-top: 10px; }
+.stat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, .03);
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+}
+.stat-label { font-size: 10.5px; color: var(--text-muted); }
+.stat-value { font-size: 17px; font-weight: 600; color: var(--text); }
+
+.section-label-row { display: flex; align-items: center; justify-content: space-between; margin: 16px 0 4px; }
+.section-count {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--brass);
+  background: var(--brass-soft);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.usage-list-scroll {
+  max-height: 190px;
+  overflow-y: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  padding: 2px 12px;
+}
+.usage-list-scroll::-webkit-scrollbar { width: 5px; }
+.usage-list-scroll::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, .12); border-radius: 4px; }
+
+.usage-row { border-bottom: 1px solid var(--border-soft); }
+.usage-row:last-child { border-bottom: none; }
+.usage-row-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  padding: 9px 0;
+  cursor: pointer;
+  text-align: left;
+}
+.usage-row-name { font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-row-meta { flex-shrink: 0; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); }
+.usage-row-caret { color: var(--brass); }
+.usage-row-head:focus-visible { outline: 2px solid var(--brass); outline-offset: -2px; border-radius: 4px; }
+
+.usage-row-files { list-style: none; margin: 0 0 10px; padding: 0 0 0 4px; display: flex; flex-direction: column; gap: 5px; }
+.usage-row-files li { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.usage-row-empty { margin: 0 0 10px; font-size: 12.5px; color: var(--text-muted); }
 
 @media (prefers-reduced-motion: reduce) {
   .popup-card { animation: none; }

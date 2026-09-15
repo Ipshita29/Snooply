@@ -722,13 +722,19 @@ function openPopupWindow(url) {
 }
 
 // Start the local server and open the popup
-function showReactPopup(flaggedItems, dependencies, usage) {
+// `verboseInfo` is only set for `snooply --verbose` - it carries the same
+// analysis result, just reshaped for the popup's deeper view.
+function showReactPopup(flaggedItems, dependencies, usage, verboseInfo) {
   return new Promise((resolve) => {
     const payload = {
       items: flaggedItems,
       dependencies: [...dependencies],
       usage: Object.fromEntries([...dependencies].map((dep) => [dep, [...(usage[dep] || [])]])),
       version: require("../package.json").version,
+      verbose: Boolean(verboseInfo),
+      project: verboseInfo ? verboseInfo.project : null,
+      packages: verboseInfo ? verboseInfo.packages : [],
+      dependencyUsage: verboseInfo ? verboseInfo.dependencyUsage : [],
     };
 
     let firstPingReceived = false;
@@ -988,8 +994,27 @@ async function main() {
     }
   }
 
+  // For --verbose, reshape the same workspace data the CLI printed
+  // above into something the popup can render. No re-analysis.
+  const verboseInfo = verbose
+    ? {
+        project: path.basename(projectPath),
+        packages: workspaces.map((ws) => ({
+          label: ws.label,
+          dependencies: ws.dependencies.size,
+          files: ws.files.length,
+        })),
+        dependencyUsage: workspaces.flatMap((ws) =>
+          [...ws.dependencies].map((dependency) => ({
+            dependency: showWorkspaceLabels ? `${dependency} (${ws.label})` : dependency,
+            files: (ws.usageByFile[dependency] || []).map((entry) => path.relative(ws.root, entry.file)),
+          }))
+        ),
+      }
+    : null;
+
   // Show the Snooply window
-  await showReactPopup(popupItems, popupDependencies, popupUsage);
+  await showReactPopup(popupItems, popupDependencies, popupUsage, verboseInfo);
 }
 
 main().catch(() => {

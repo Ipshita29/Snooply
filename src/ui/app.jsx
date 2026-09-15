@@ -3,10 +3,11 @@
 
   function getData() {
     const el = document.getElementById("snooply-data");
+    const fallback = { items: [], dependencies: [], usage: {}, version: null, verbose: false, project: null, packages: [], dependencyUsage: [] };
     try {
-      return JSON.parse(el.textContent);
+      return { ...fallback, ...JSON.parse(el.textContent) };
     } catch (error) {
-      return { items: [], dependencies: [], usage: {}, version: null };
+      return fallback;
     }
   }
 
@@ -370,6 +371,139 @@
     );
   }
 
+  // --- Verbose popup ---
+  // Same analysis result as normal mode, just shown in more detail.
+  // The CLI only sends this extra data when run with --verbose.
+
+  function VerboseBadge() {
+    return h("span", { className: "verbose-badge" }, "VERBOSE");
+  }
+
+  // One dependency's usage - click to expand its file list
+  function DependencyUsageRow(props) {
+    const entry = props.entry;
+    const [open, setOpen] = React.useState(false);
+    const count = entry.files.length;
+
+    return h(
+      "div",
+      { className: "usage-row" },
+      h(
+        "button",
+        { className: "usage-row-head", onClick: () => setOpen(!open), "aria-expanded": open },
+        h("span", { className: "usage-row-name" }, entry.dependency),
+        h(
+          "span",
+          { className: "usage-row-meta" },
+          `${count} file${count === 1 ? "" : "s"}`,
+          h("span", { className: "usage-row-caret" }, open ? "⌄" : "›")
+        )
+      ),
+      open &&
+        (count > 0
+          ? h(
+              "ul",
+              { className: "usage-row-files" },
+              entry.files.map((file, i) => h("li", { key: file + i }, file))
+            )
+          : h("p", { className: "usage-row-empty" }, "No usage found."))
+    );
+  }
+
+  function ProjectOverview(props) {
+    const packages = props.packages;
+    const single = packages.length <= 1;
+
+    return h(
+      "div",
+      { className: "verbose-section" },
+      h("p", { className: "detail-label" }, "Project"),
+      h("p", { className: "project-name" }, `${props.project}/`),
+      single
+        ? h(
+            "div",
+            { className: "overview-stats" },
+            h(
+              "div",
+              { className: "stat" },
+              h("span", { className: "stat-label" }, "Dependencies"),
+              h("span", { className: "stat-value" }, packages[0] ? packages[0].dependencies : 0)
+            ),
+            h(
+              "div",
+              { className: "stat" },
+              h("span", { className: "stat-label" }, "Source files"),
+              h("span", { className: "stat-value" }, packages[0] ? packages[0].files : 0)
+            )
+          )
+        : h(
+            "div",
+            { className: "deps-list" },
+            packages.map((pkg) =>
+              h(
+                "div",
+                { className: "dep-row", key: pkg.label },
+                h("span", { className: "dep-name" }, `${pkg.label}/`),
+                h("span", { className: "dep-usage" }, `${pkg.dependencies} deps · ${pkg.files} files`)
+              )
+            )
+          )
+    );
+  }
+
+  // The deeper "verbose" home screen - project overview, every
+  // dependency's usage, then the same recommendation cards as normal mode
+  function VerboseHome(props) {
+    const data = props.data;
+    const items = data.items || [];
+    const dependencyUsage = data.dependencyUsage || [];
+
+    return h(
+      React.Fragment,
+      null,
+      h(
+        "div",
+        { className: "verbose-header" },
+        h("p", { className: "brand-title", style: { margin: 0 } }, "Snooply"),
+        h(VerboseBadge, null)
+      ),
+      h("p", { className: "brand-subhead" }, "A closer look at your project."),
+
+      h(ProjectOverview, { project: data.project, packages: data.packages || [] }),
+
+      h(
+        "div",
+        { className: "verbose-section" },
+        h("p", { className: "detail-label" }, "Dependency usage"),
+        h(
+          "div",
+          { className: "usage-list-scroll" },
+          dependencyUsage.map((entry, i) => h(DependencyUsageRow, { key: entry.dependency + i, entry }))
+        )
+      ),
+
+      h(
+        "div",
+        { className: "verbose-section" },
+        h(
+          "div",
+          { className: "section-label-row" },
+          h("p", { className: "detail-label", style: { margin: 0 } }, "Recommendations"),
+          items.length > 0 && h("span", { className: "section-count" }, items.length)
+        ),
+        items.length === 0
+          ? h("p", { className: "detail-text muted" }, "♡ Nothing flagged. Everything looks pretty reasonable.")
+          : h(
+              "div",
+              { className: "card-list" },
+              items.map((item, i) => h(RecommendationCard, { key: item.dependency + i, item, onExplore: props.onExplore }))
+            )
+      ),
+
+      h(Footer, { version: data.version })
+    );
+  }
+
   // Popup frame - background glow, fixed-size card, drag handling
   // The card's size never changes; whatever view is showing scrolls
   // inside it instead of the window growing or shrinking.
@@ -428,10 +562,17 @@
     // Pick which view to show
     let body;
 
+    const goExplore = (it) => {
+      setSelected(it);
+      setView("explore");
+    };
+
     if (view === "explore" && selected) {
       body = h(ExploreView, { item: selected, onBack: () => setView("list") });
     } else if (view === "all") {
       body = h(AllDependenciesView, { dependencies: data.dependencies, usage: data.usage, onBack: () => setView("list") });
+    } else if (data.verbose) {
+      body = h(VerboseHome, { data, onExplore: goExplore });
     } else if (items.length === 0) {
       body = h(EmptyState, { onSeeAll: () => setView("all"), version: data.version });
     } else {
@@ -446,14 +587,7 @@
           "div",
           { className: "card-list" },
           items.map((item, i) =>
-            h(RecommendationCard, {
-              key: item.dependency + i,
-              item,
-              onExplore: (it) => {
-                setSelected(it);
-                setView("explore");
-              },
-            })
+            h(RecommendationCard, { key: item.dependency + i, item, onExplore: goExplore })
           )
         ),
         h(SeeAllRow, { onSeeAll: () => setView("all") }),
