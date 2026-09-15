@@ -171,7 +171,7 @@
         "div",
         { className: "card-actions" + (isUnused ? "" : " only-explore") },
         isUnused &&
-          h("code", { className: "uninstall-pill" }, `npm uninstall ${baseDependencyName(item.dependency)}`),
+          h("code", { className: "uninstall-pill" }, item.uninstallCommand),
         h("button", { className: "explore-btn", onClick: () => props.onExplore(item) }, "Explore", h("span", null, "→"))
       )
     );
@@ -233,11 +233,8 @@
     const item = props.item;
     const isUnused = item.kind === "UNUSED";
     const where = item.where || [];
-    const baseName = baseDependencyName(item.dependency);
-    const uninstallCommand = `npm uninstall ${baseName}`;
-    const installCommand = item.suggestedPackages && item.suggestedPackages.length > 0
-      ? `npm install ${item.suggestedPackages.join(" ")}`
-      : null;
+    const uninstallCommand = item.uninstallCommand;
+    const installCommand = item.installCommand;
 
     return h(
       "div",

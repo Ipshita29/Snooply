@@ -6,13 +6,37 @@ const fs = require("fs");
 const path = require("path");
 
 const PACKAGE_MANAGERS = [
-  { id: "npm", manifestFiles: ["package.json"] },
-  { id: "python", manifestFiles: ["requirements.txt", "pyproject.toml"] },
+  {
+    id: "npm",
+    manifestFiles: ["package.json"],
+    uninstallCommand: (name) => `npm uninstall ${name}`,
+    installCommand: (names) => `npm install ${names.join(" ")}`,
+  },
+  {
+    id: "pip",
+    manifestFiles: ["requirements.txt", "pyproject.toml"],
+    uninstallCommand: (name) => `pip uninstall ${name}`,
+    installCommand: (names) => `pip install ${names.join(" ")}`,
+  },
 ];
 
 // Manifest filenames Snooply knows how to recognize a workspace by
 function manifestFileNames() {
   return PACKAGE_MANAGERS.flatMap((manager) => manager.manifestFiles);
+}
+
+function findPackageManager(id) {
+  return PACKAGE_MANAGERS.find((manager) => manager.id === id) || PACKAGE_MANAGERS[0];
+}
+
+// Build the real remove/add command for a dependency, based on which
+// package manager actually declared it - not the dependency's name.
+function uninstallCommandFor(packageManagerId, name) {
+  return findPackageManager(packageManagerId).uninstallCommand(name);
+}
+
+function installCommandFor(packageManagerId, names) {
+  return findPackageManager(packageManagerId).installCommand(names);
 }
 
 // Read an npm package.json into dependency names
@@ -121,29 +145,46 @@ function readPythonManifest(root) {
 // Read every manifest present in a workspace root and merge them.
 // A workspace is usually just one ecosystem, but this doesn't assume
 // that - an npm and a Python manifest side by side both get picked up.
+// `packageManagers` records which manager declared each dependency, so
+// later steps (like building an uninstall command) use the real tool
+// instead of guessing from the dependency's name.
 function readManifest(root) {
   const dependencies = new Set();
   const devDependencyNames = new Set();
+  const packageManagers = {};
   let found = false;
 
   if (fs.existsSync(path.join(root, "package.json"))) {
     const npm = readNpmManifest(root);
     found = true;
-    for (const dep of npm.dependencies) dependencies.add(dep);
+    for (const dep of npm.dependencies) {
+      dependencies.add(dep);
+      packageManagers[dep] = "npm";
+    }
     for (const dep of npm.devDependencyNames) devDependencyNames.add(dep);
   }
 
   if (fs.existsSync(path.join(root, "requirements.txt")) || fs.existsSync(path.join(root, "pyproject.toml"))) {
     const python = readPythonManifest(root);
     found = true;
-    for (const dep of python.dependencies) dependencies.add(dep);
+    for (const dep of python.dependencies) {
+      dependencies.add(dep);
+      packageManagers[dep] = "pip";
+    }
   }
 
   if (!found) {
     throw new Error(`No package manifest found at ${root}`);
   }
 
-  return { dependencies, devDependencyNames };
+  return { dependencies, devDependencyNames, packageManagers };
 }
 
-module.exports = { manifestFileNames, readNpmManifest, readPythonManifest, readManifest };
+module.exports = {
+  manifestFileNames,
+  readNpmManifest,
+  readPythonManifest,
+  readManifest,
+  uninstallCommandFor,
+  installCommandFor,
+};

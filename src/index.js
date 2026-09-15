@@ -7,7 +7,7 @@ const http = require("http");
 const { spawn } = require("child_process");
 
 const { findWorkspaceRoots, getWorkspaceLabel } = require("./core/project");
-const { readManifest } = require("./core/package-managers");
+const { readManifest, uninstallCommandFor, installCommandFor } = require("./core/package-managers");
 const { analyzeWorkspace } = require("./core/analyzer");
 const { buildResults, formatUsageForDisplay } = require("./core/recommendations");
 
@@ -342,7 +342,7 @@ async function main() {
       continue;
     }
 
-    const { dependencies, devDependencyNames } = manifest;
+    const { dependencies, devDependencyNames, packageManagers } = manifest;
 
     // Don't scan into other workspaces nested in this one
     const excludedDirs = new Set(
@@ -357,6 +357,7 @@ async function main() {
       label: getWorkspaceLabel(root, projectPath),
       root,
       dependencies,
+      packageManagers,
       usage,
       usageByFile,
       files,
@@ -418,6 +419,10 @@ async function main() {
     // is invented; it's just the analyzer's own data, reshaped.
     const withEvidence = (item, kind) => {
       const fileEntries = ws.usageByFile[item.dependency] || [];
+      // Real package manager for this dependency (npm, pip, ...) - used
+      // to build a real uninstall/install command, not a guessed one
+      const packageManager = ws.packageManagers[item.dependency] || "npm";
+
       return {
         ...item,
         kind,
@@ -429,6 +434,11 @@ async function main() {
         filesChecked: ws.files.length,
         dependenciesChecked: ws.dependencies.size,
         dependenciesList: [...ws.dependencies],
+        packageManager,
+        uninstallCommand: uninstallCommandFor(packageManager, item.dependency),
+        installCommand: item.suggestedPackages.length > 0
+          ? installCommandFor(packageManager, item.suggestedPackages)
+          : null,
       };
     };
 
