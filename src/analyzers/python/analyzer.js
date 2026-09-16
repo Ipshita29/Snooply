@@ -4,7 +4,9 @@
 // actually import. There's no lightweight Python parser available in
 // this Node/CommonJS CLI, so this reads imports line by line with a
 // couple of regexes instead - reliable enough for real import
-// statements without pulling in parsing infrastructure.
+// statements without pulling in parsing infrastructure. Comments and
+// strings (including triple-quoted docstrings) are stripped first, so
+// "import"-shaped text inside them is never mistaken for a real import.
 
 const fs = require("fs");
 const { findSourceFiles } = require("../../core/project");
@@ -85,20 +87,105 @@ function addImportedNames(usageSet, importedNames) {
   }
 }
 
+// Strip comments and strings (including triple-quoted docstrings) so
+// "import"-shaped text inside them isn't mistaken for a real import.
+// Stripped spans become spaces (newlines kept) so line-based matching
+// below still works unchanged.
+function stripPythonNoise(code) {
+  let out = "";
+  let i = 0;
+  const n = code.length;
+
+  while (i < n) {
+    const ch = code[i];
+
+    // Line comment
+    if (ch === "#") {
+      while (i < n && code[i] !== "\n") {
+        out += " ";
+        i++;
+      }
+      continue;
+    }
+
+    // Triple-quoted string/docstring (''' or """) - can span many lines
+    if ((ch === '"' || ch === "'") && code[i + 1] === ch && code[i + 2] === ch) {
+      const quote = ch;
+      out += "   ";
+      i += 3;
+      while (i < n && !(code[i] === quote && code[i + 1] === quote && code[i + 2] === quote)) {
+        if (code[i] === "\\" && i + 1 < n) {
+          out += "  ";
+          i += 2;
+        } else {
+          out += code[i] === "\n" ? "\n" : " ";
+          i++;
+        }
+      }
+      if (i < n) {
+        out += "   ";
+        i += 3;
+      }
+      continue;
+    }
+
+    // Regular single-line string
+    if (ch === '"' || ch === "'") {
+      const quote = ch;
+      out += " ";
+      i++;
+      while (i < n && code[i] !== quote && code[i] !== "\n") {
+        if (code[i] === "\\" && i + 1 < n) {
+          out += "  ";
+          i += 2;
+        } else {
+          out += " ";
+          i++;
+        }
+      }
+      if (i < n && code[i] === quote) {
+        out += " ";
+        i++;
+      }
+      continue;
+    }
+
+    out += ch;
+    i++;
+  }
+
+  return out;
+}
+
+// Does this (trimmed) import tail look like an unclosed "(" group?
+function hasUnclosedParen(text) {
+  return text.includes("(") && !text.includes(")");
+}
+
 // Parse one Python file and find package usage
 function analyzeFile(code, dependencyLookup, usage) {
-  for (const rawLine of code.split("\n")) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) {
+  const stripped = stripPythonNoise(code);
+  const lines = stripped.split("\n");
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) {
       continue;
     }
 
     // from x.y import a, b as c
     const fromMatch = line.match(/^from\s+(\.+)?([\w.]*)\s+import\s+(.+)$/);
     if (fromMatch) {
-      const [, leadingDots, modulePath, importedNames] = fromMatch;
+      const [, leadingDots, modulePath, firstPart] = fromMatch;
       if (leadingDots) {
         continue; // relative import - local module, not a dependency
+      }
+
+      // Grouped multiline import: from x import (\n  a,\n  b,\n)
+      let importedNames = firstPart;
+      while (hasUnclosedParen(importedNames) && i + 1 < lines.length) {
+        i++;
+        importedNames += " " + lines[i].trim();
       }
 
       const pkg = resolveTrackedPackage(modulePath, dependencyLookup);

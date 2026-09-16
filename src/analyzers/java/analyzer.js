@@ -3,13 +3,14 @@
 // Finds .java source files and reports which declared Maven/Gradle
 // dependencies they actually import. There's no lightweight Java
 // parser available in this Node/CommonJS CLI, so this reads import
-// statements line by line instead - reliable for real import syntax,
-// though (being regex-based) it can't perfectly tell a comment from a
-// string literal in every case. Block and line comments are stripped
-// before scanning to keep obvious false positives out.
+// statements line by line instead - reliable for real import syntax.
+// Comments and string literals (including text blocks) are stripped
+// first, so "import"-shaped text inside them is never mistaken for a
+// real import.
 
 const fs = require("fs");
 const { findSourceFiles } = require("../../core/project");
+const { stripCodeNoise } = require("../shared/strip-code-noise");
 
 const EXTENSIONS = [".java"];
 
@@ -68,27 +69,33 @@ function resolveTrackedPackages(importPath, dependencyCoordinates) {
   return matches;
 }
 
-// Strip comments so "// import fake.Foo;" isn't mistaken for a real one
-function stripComments(code) {
-  return code.replace(/\/\*[\s\S]*?\*\//g, "");
-}
-
 // Parse one Java file and find package usage
 function analyzeFile(code, dependencyCoordinates, usage) {
-  const stripped = stripComments(code);
+  const stripped = stripCodeNoise(code, { nestedBlockComments: false });
+  const lines = stripped.split("\n");
 
-  for (const rawLine of stripped.split("\n")) {
-    const line = rawLine.split("//")[0].trim();
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i].trim();
     if (!line.startsWith("import")) {
       continue;
     }
 
-    const match = line.match(/^import\s+(static\s+)?([\w.*]+)\s*;/);
+    // An import can (rarely) be split across lines with no delimiter
+    // other than the missing terminator - keep pulling lines in until
+    // we see the ";". Joining with a space and stripping whitespace
+    // from the matched path afterward handles the break landing
+    // anywhere, without needing to guess where a real space belongs.
+    while (!line.includes(";") && i + 1 < lines.length) {
+      i++;
+      line += " " + lines[i].trim();
+    }
+
+    const match = line.match(/^import\s+(static\s+)?([\w.\s*]+?)\s*;/);
     if (!match) {
       continue;
     }
 
-    let importPath = match[2];
+    let importPath = match[2].replace(/\s+/g, "");
     const isWildcard = importPath.endsWith(".*");
     if (isWildcard) {
       importPath = importPath.slice(0, -2);

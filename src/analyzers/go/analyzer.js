@@ -3,14 +3,15 @@
 // Finds .go source files and reports which declared go.mod
 // dependencies they actually import. There's no lightweight Go parser
 // available in this Node/CommonJS CLI, so this reads import statements
-// line by line instead - reliable for real import syntax, though
-// (being regex-based) it can't perfectly tell a comment from a string
-// literal in every case. Comments are stripped before scanning to keep
-// obvious false positives out.
+// with regexes instead - reliable for real import syntax. Comments and
+// string literals (including multi-line raw strings) are stripped
+// first, so "import"-shaped text inside them is never mistaken for a
+// real import.
 
 const fs = require("fs");
 const path = require("path");
 const { findSourceFiles } = require("../../core/project");
+const { stripCodeNoise } = require("../shared/strip-code-noise");
 
 const EXTENSIONS = [".go"];
 
@@ -28,15 +29,6 @@ function readModulePath(root) {
   } catch (error) {
     return null;
   }
-}
-
-// Strip comments so "// import ..." isn't mistaken for a real import
-function stripComments(code) {
-  const withoutBlocks = code.replace(/\/\*[\s\S]*?\*\//g, "");
-  return withoutBlocks
-    .split("\n")
-    .map((line) => line.split("//")[0])
-    .join("\n");
 }
 
 // Pull import paths out of both grouped and single-line import
@@ -108,7 +100,15 @@ function resolveTrackedPackage(importPath, dependencyPaths) {
 
 // Parse one Go file and find package usage
 function analyzeFile(code, dependencyPaths, ownModulePath, usage) {
-  const importPaths = extractImportPaths(stripComments(code));
+  // Go import paths are themselves double-quoted strings, so those
+  // must be left alone here - only backtick raw strings (which can
+  // never legitimately hold part of an import statement) get stripped.
+  const stripped = stripCodeNoise(code, {
+    nestedBlockComments: false,
+    backtickStrings: true,
+    doubleQuoteStrings: false,
+  });
+  const importPaths = extractImportPaths(stripped);
 
   for (const importPath of importPaths) {
     if (isStandardLibrary(importPath)) {

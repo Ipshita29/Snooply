@@ -4,12 +4,13 @@
 // dependencies they actually use. There's no lightweight Rust parser
 // available in this Node/CommonJS CLI, so this extracts `use` and
 // `extern crate` statements with regexes instead - reliable for real
-// import syntax, though (being regex-based) it can't perfectly tell a
-// comment from a string literal in every case. Comments are stripped
-// before scanning to keep obvious false positives out.
+// import syntax. Comments and string literals are stripped first, so
+// "use"-shaped text inside them (including inside a macro's string
+// argument) is never mistaken for a real import.
 
 const fs = require("fs");
 const { findSourceFiles } = require("../../core/project");
+const { stripCodeNoise } = require("../shared/strip-code-noise");
 
 const EXTENSIONS = [".rs"];
 
@@ -25,15 +26,6 @@ function sleep(ms) {
 // valid in a Rust identifier)
 function normalizeName(name) {
   return name.replace(/-/g, "_");
-}
-
-// Strip comments so "// use fake::package;" isn't mistaken for real
-function stripComments(code) {
-  const withoutBlocks = code.replace(/\/\*[\s\S]*?\*\//g, "");
-  return withoutBlocks
-    .split("\n")
-    .map((line) => line.split("//")[0])
-    .join("\n");
 }
 
 // Pull the crate name and (when simple enough) the imported item out
@@ -65,7 +57,7 @@ function recordUsage(rawPath, dependencyLookup, usage) {
 
 // Parse one Rust file and find crate usage
 function analyzeFile(code, dependencyLookup, usage) {
-  const stripped = stripComments(code);
+  const stripped = stripCodeNoise(code, { nestedBlockComments: true });
 
   const usePattern = /\b(?:pub\s+)?use\s+([^;]+);/g;
   let match;
