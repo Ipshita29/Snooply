@@ -15,6 +15,11 @@
 // to decide whether a finding is trustworthy enough to surface, and to
 // keep MEDIUM wording appropriately cautious.
 
+// Snooply must never flag itself. If Snooply is installed as a
+// dependency of the project it's analyzing, it would otherwise show
+// up as "unused" since a project never imports its own CLI tool.
+const SELF_PACKAGE_NAME = "snooply";
+
 const CONFIDENCE = { HIGH: "HIGH", MEDIUM: "MEDIUM", LOW: "LOW" };
 const CONFIDENCE_RANK = { HIGH: 2, MEDIUM: 1, LOW: 0 };
 
@@ -207,6 +212,10 @@ function buildResults(usage, devDependencyNames, context = {}) {
   const unused = [];
 
   for (const [dependency, used] of Object.entries(usage)) {
+    if (dependency === SELF_PACKAGE_NAME) {
+      continue;
+    }
+
     const result = evaluateDependency(dependency, used, devDependencyNames.has(dependency));
 
     if (result.status === "NO_FINDING") {

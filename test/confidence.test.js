@@ -256,6 +256,31 @@ function restoreReadable(paths) {
     }
   });
 
+  // ================= Self-exclusion =================
+
+  await test("Snooply never flags itself as unused, even if listed as a dependency", async () => {
+    const dir = makeFixture({
+      "package.json": JSON.stringify({ dependencies: { snooply: "1.0.0" } }),
+      "index.js": "console.log('hi');",
+    });
+    const result = await findingsFor(dir);
+    assert.strictEqual(findingFor(result, "snooply"), undefined);
+    assert.strictEqual(result.unused.length, 0);
+    assert.strictEqual(result.recommendations.length, 0);
+  });
+
+  await test("Excluding Snooply does not hide a genuinely unused sibling dependency", async () => {
+    const dir = makeFixture({
+      "package.json": JSON.stringify({ dependencies: { snooply: "1.0.0", axios: "1.0.0" } }),
+      "index.js": "console.log('hi');",
+    });
+    const result = await findingsFor(dir);
+    assert.strictEqual(findingFor(result, "snooply"), undefined);
+    const axiosFinding = findingFor(result, "axios");
+    assert.ok(axiosFinding, "a real unused dependency must still be flagged");
+    assert.strictEqual(axiosFinding.confidence, "HIGH");
+  });
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exitCode = failed > 0 ? 1 : 0;
 })();

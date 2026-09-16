@@ -25,6 +25,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const http = require("http");
 const assert = require("assert");
 const { spawn, execSync } = require("child_process");
 
@@ -85,6 +86,51 @@ function killPid(pid) {
   } catch (error) {
     // already gone
   }
+}
+
+// Fetch just the status code for a URL - used to confirm a static
+// asset route responds instead of crashing the server.
+function fetchStatus(url) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, (res) => {
+      res.resume(); // drain the body, we only care about the status
+      resolve(res.statusCode);
+    });
+    req.on("error", reject);
+  });
+}
+
+// Find a newly-spawned popup window not present in `pidsBefore`, and
+// pull the URL it was launched with out of its own command line.
+function findNewPopupUrl(pidsBefore) {
+  try {
+    const out = execSync("ps -eo pid=,command=", { encoding: "utf-8" });
+    for (const line of out.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const spaceIndex = trimmed.indexOf(" ");
+      if (spaceIndex === -1) continue;
+      const pid = trimmed.slice(0, spaceIndex);
+      const command = trimmed.slice(spaceIndex + 1);
+      const match = command.match(/window\.js (http:\/\/127\.0\.0\.1:\d+\/)/);
+      if (match && !pidsBefore.has(pid)) {
+        return { pid, url: match[1] };
+      }
+    }
+  } catch (error) {
+    // ignore - treated as "not found yet" by the caller
+  }
+  return null;
+}
+
+async function waitForNewPopupUrl(pidsBefore, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const found = findNewPopupUrl(pidsBefore);
+    if (found) return found;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return null;
 }
 
 // Spawn the real CLI against a fixture directory and capture its
@@ -255,6 +301,88 @@ function runCli(cwd, args = [], waitMs = 1800) {
     assert.ok(stdout.includes("SOURCE FILES"), stdout);
     assert.ok(stdout.includes("lodash"), stdout);
     assert.ok(stdout.includes("just-debounce-it"), stdout);
+  });
+
+  // ================= Snooply never flags itself =================
+
+  await test("CLI: Snooply itself is never flagged, even when listed as a dependency", async () => {
+    // Reproduces installing Snooply into the project it's analyzing -
+    // it then shows up in that project's own dependencies, but must
+    // never be reported as unused.
+    const dir = makeFixture({
+      "package.json": JSON.stringify({ dependencies: { snooply: "1.0.0", axios: "1.0.0" } }),
+      "index.js": "console.log('hi');",
+    });
+    const { stdout } = await runCli(dir);
+    assert.ok(!stdout.includes("snooply"), stdout);
+    assert.ok(stdout.includes("axios"), stdout);
+    assert.ok(/found 1 thing/.test(stdout), stdout);
+  });
+
+  // ================= Packaged install (hoisted dependencies) =================
+
+  await test("CLI: packaged install with hoisted react/react-dom does not crash serving the popup", async () => {
+    // Reproduces the real npm/npx topology that broke this: Snooply
+    // nested under another project's node_modules, with react,
+    // react-dom, and electron hoisted up to that project's own
+    // top-level node_modules instead of nested inside Snooply's own -
+    // exactly what `npx snooply` produces. The old code resolved
+    // react/react-dom via a hardcoded "../node_modules" guess relative
+    // to src/index.js, which only happens to exist in this repo's own
+    // flat dev layout; here it would not exist, causing a read to
+    // throw mid-response and crash the process with
+    // ERR_HTTP_HEADERS_SENT.
+    const fakeConsumer = fs.mkdtempSync(path.join(os.tmpdir(), "snooply-packaged-test-"));
+    const repoRoot = path.join(__dirname, "..");
+    const nestedSnooplyDir = path.join(fakeConsumer, "node_modules", "snooply");
+
+    fs.mkdirSync(nestedSnooplyDir, { recursive: true });
+    // Copied, not symlinked - a symlink would resolve __dirname back to
+    // the real repo and hide the exact bug this test is checking for.
+    fs.cpSync(path.join(repoRoot, "src"), path.join(nestedSnooplyDir, "src"), { recursive: true });
+    fs.copyFileSync(path.join(repoRoot, "package.json"), path.join(nestedSnooplyDir, "package.json"));
+
+    // Hoisted: siblings of node_modules/snooply, not nested inside it.
+    for (const dep of ["react", "react-dom", "electron"]) {
+      fs.symlinkSync(path.join(repoRoot, "node_modules", dep), path.join(fakeConsumer, "node_modules", dep));
+    }
+    // @babel/parser lives one level deeper (scoped package)
+    fs.mkdirSync(path.join(fakeConsumer, "node_modules", "@babel"), { recursive: true });
+    fs.symlinkSync(
+      path.join(repoRoot, "node_modules", "@babel", "parser"),
+      path.join(fakeConsumer, "node_modules", "@babel", "parser")
+    );
+
+    fs.writeFileSync(path.join(fakeConsumer, "package.json"), JSON.stringify({ dependencies: { axios: "1.0.0" } }));
+    fs.writeFileSync(path.join(fakeConsumer, "index.js"), "console.log('hi');");
+
+    const nestedCliPath = path.join(nestedSnooplyDir, "src", "index.js");
+    const pidsBefore = new Set(listPopupPids());
+    const child = spawn(process.execPath, [nestedCliPath], { cwd: fakeConsumer });
+
+    let stderr = "";
+    let exited = false;
+    child.stderr.on("data", (chunk) => (stderr += chunk.toString()));
+    child.on("exit", () => {
+      exited = true;
+    });
+
+    try {
+      const popup = await waitForNewPopupUrl(pidsBefore);
+      assert.ok(popup, `expected a popup window to launch. stderr: ${stderr}`);
+
+      const reactStatus = await fetchStatus(`${popup.url}react.js`);
+      const reactDomStatus = await fetchStatus(`${popup.url}react-dom.js`);
+
+      assert.strictEqual(reactStatus, 200, `expected /react.js to resolve, got ${reactStatus}. stderr: ${stderr}`);
+      assert.strictEqual(reactDomStatus, 200, `expected /react-dom.js to resolve, got ${reactDomStatus}. stderr: ${stderr}`);
+      assert.ok(!exited, `the CLI process must not crash serving popup assets. stderr: ${stderr}`);
+      assert.ok(!stderr.includes("ERR_HTTP_HEADERS_SENT"), stderr);
+
+      killPid(popup.pid);
+    } finally {
+      child.kill("SIGKILL");
+    }
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

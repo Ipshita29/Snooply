@@ -14,10 +14,12 @@
     "dependencies",
     "developer-tools",
     "npm",
-    "cli"
+    "cli",
+    "code-analysis",
+    "unused-dependencies"
   ],
-  "author": "",
-  "license": "ISC",
+  "author": "Ipshita Patel",
+  "license": "MIT",
   "dependencies": {
     "@babel/parser": "^7.29.8",
     "electron": "^44.3.0",

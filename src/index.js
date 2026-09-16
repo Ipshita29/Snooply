@@ -114,10 +114,19 @@ function printSkippedFiles(skippedFiles, root) {
 // anything. Server shuts down once the popup is closed.
 
 const UI_DIR = path.join(__dirname, "ui");
-const NODE_MODULES_DIR = path.join(__dirname, "..", "node_modules");
 
 function readUiFile(...segments) {
   return fs.readFileSync(path.join(...segments), "utf-8");
+}
+
+// Find a dependency's own directory via Node's real module resolution,
+// not a hardcoded "../node_modules" guess. When Snooply is installed
+// inside another project (npm install/npx), npm hoists react/react-dom
+// up to that project's own node_modules instead of nesting them under
+// Snooply's - a fixed relative path only happens to work in this
+// repo's own flat layout.
+function resolvePackageDir(packageName) {
+  return path.dirname(require.resolve(`${packageName}/package.json`));
 }
 
 // Build the popup's HTML page
@@ -259,10 +268,10 @@ function showReactPopup(flaggedItems, dependencies, usage, verboseInfo) {
           res.end(readUiFile(UI_DIR, "app.css"));
         } else if (url === "/react.js") {
           res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8" });
-          res.end(readUiFile(NODE_MODULES_DIR, "react", "umd", "react.production.min.js"));
+          res.end(readUiFile(resolvePackageDir("react"), "umd", "react.production.min.js"));
         } else if (url === "/react-dom.js") {
           res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8" });
-          res.end(readUiFile(NODE_MODULES_DIR, "react-dom", "umd", "react-dom.production.min.js"));
+          res.end(readUiFile(resolvePackageDir("react-dom"), "umd", "react-dom.production.min.js"));
         } else if (url === "/ping") {
           firstPingReceived = true;
           lastPingAt = Date.now();
@@ -277,7 +286,12 @@ function showReactPopup(flaggedItems, dependencies, usage, verboseInfo) {
           res.end();
         }
       } catch (error) {
-        res.writeHead(500);
+        // Headers may already be sent if the failure happened while
+        // building the body after a successful writeHead() above -
+        // writing them again would itself throw (ERR_HTTP_HEADERS_SENT).
+        if (!res.headersSent) {
+          res.writeHead(500);
+        }
         res.end();
       }
     });
