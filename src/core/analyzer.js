@@ -33,6 +33,9 @@ async function analyzeWorkspace(root, dependencies, excludedDirs = new Set()) {
   const skippedFiles = [];
   const usage = {};
   const usageByFile = {};
+  // Per-dependency confidence hint from an analyzer whose match wasn't
+  // a direct one (e.g. Java's groupId fallback) - absent means "high"
+  const matchConfidence = {};
 
   for (const dependency of dependencies) {
     usage[dependency] = new Set();
@@ -45,6 +48,7 @@ async function analyzeWorkspace(root, dependencies, excludedDirs = new Set()) {
     languages.push(result.language);
     files.push(...result.sourceFiles);
     skippedFiles.push(...result.skippedFiles);
+    Object.assign(matchConfidence, result.matchConfidence);
 
     for (const dependency of dependencies) {
       for (const evidence of result.usage[dependency] || []) {
@@ -54,7 +58,7 @@ async function analyzeWorkspace(root, dependencies, excludedDirs = new Set()) {
     }
   }
 
-  return { languages, files, skippedFiles, usage, usageByFile };
+  return { languages, files, skippedFiles, usage, usageByFile, matchConfidence };
 }
 
 module.exports = { analyzeWorkspace, selectAnalyzers };

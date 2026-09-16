@@ -6,6 +6,35 @@
 //
 // This only looks at usage evidence - it doesn't care which language
 // analyzer produced it.
+//
+// Every finding also carries an internal confidence level (HIGH,
+// MEDIUM, LOW) based on how much of the project Snooply could actually
+// read and how directly its evidence maps to the dependency. LOW
+// findings are never shown - Snooply would rather say nothing than
+// confidently guess wrong. This is never exposed as a score, just used
+// to decide whether a finding is trustworthy enough to surface, and to
+// keep MEDIUM wording appropriately cautious.
+
+const CONFIDENCE = { HIGH: "HIGH", MEDIUM: "MEDIUM", LOW: "LOW" };
+const CONFIDENCE_RANK = { HIGH: 2, MEDIUM: 1, LOW: 0 };
+
+// The most cautious of several confidence signals
+function lowestConfidence(...levels) {
+  return levels.reduce((worst, level) => (CONFIDENCE_RANK[level] < CONFIDENCE_RANK[worst] ? level : worst), CONFIDENCE.HIGH);
+}
+
+// How much of the workspace's source Snooply actually managed to read.
+// A dependency can't be confidently called "unused" if a meaningful
+// share of the source that might use it never got checked.
+function parseCoverageConfidence(skippedFileCount, totalFileCount) {
+  if (!totalFileCount || skippedFileCount === 0) {
+    return CONFIDENCE.HIGH;
+  }
+  if (skippedFileCount / totalFileCount >= 0.5) {
+    return CONFIDENCE.LOW;
+  }
+  return CONFIDENCE.MEDIUM;
+}
 
 // Markers for "used, but no specific function name"
 const NON_SPECIFIC_MARKERS = new Set(["default", "*", "JSX"]);
@@ -151,31 +180,71 @@ function formatUsageForDisplay(used) {
   return labels.length > 0 ? labels.join(", ") : null;
 }
 
-// Create dependency recommendations
-function buildResults(usage, devDependencyNames) {
+// Cautious wording added to a MEDIUM-confidence finding - never claim
+// more certainty than the evidence actually supports.
+function withCaveat(reason, coverage, mapping) {
+  const notes = [];
+  if (coverage === CONFIDENCE.MEDIUM) {
+    notes.push("Some source files in this project couldn't be checked, so this may not be fully accurate.");
+  }
+  if (mapping === CONFIDENCE.MEDIUM) {
+    notes.push("This is based on a less direct package-to-import match.");
+  }
+  return notes.length > 0 ? `${reason} ${notes.join(" ")}` : reason;
+}
+
+// Create dependency recommendations.
+// `context` carries the same evidence the analyzers already produced -
+// how many source files were skipped/scanned, and (for a dependency
+// matched through a less direct mapping, e.g. Java's groupId fallback)
+// a per-dependency confidence hint. Nothing here is invented; it's
+// existing evidence, just used to decide how much to trust a finding.
+function buildResults(usage, devDependencyNames, context = {}) {
+  const { skippedFiles = [], totalFiles = 0, matchConfidence = {} } = context;
+  const coverage = parseCoverageConfidence(skippedFiles.length, totalFiles);
+
   const recommendations = [];
   const unused = [];
 
   for (const [dependency, used] of Object.entries(usage)) {
     const result = evaluateDependency(dependency, used, devDependencyNames.has(dependency));
 
+    if (result.status === "NO_FINDING") {
+      continue;
+    }
+
+    // A dependency that already has usage evidence is never "unused",
+    // so a less-direct mapping only matters for a KNOWN_ALTERNATIVE claim
+    const mapping = matchConfidence[dependency] === "medium" ? CONFIDENCE.MEDIUM : CONFIDENCE.HIGH;
+    const confidence = result.status === "UNUSED" ? coverage : lowestConfidence(coverage, mapping);
+
+    // Not enough evidence to say anything useful - stay quiet rather
+    // than show a noisy, unreliable "maybe" recommendation
+    if (confidence === CONFIDENCE.LOW) {
+      continue;
+    }
+
+    const reason = confidence === CONFIDENCE.MEDIUM ? withCaveat(result.reason, coverage, mapping) : result.reason;
+
     if (result.status === "KNOWN_ALTERNATIVE") {
       recommendations.push({
         dependency,
         used: result.used,
-        reason: result.reason,
+        reason,
         suggestion: result.suggestion,
         suggestedPackages: result.suggestedPackages,
         hasAlternative: true,
+        confidence,
       });
     } else if (result.status === "UNUSED") {
       unused.push({
         dependency,
         used: [],
-        reason: result.reason,
+        reason,
         suggestion: result.suggestion,
         suggestedPackages: [],
         hasAlternative: false,
+        confidence,
       });
     }
   }
@@ -183,4 +252,4 @@ function buildResults(usage, devDependencyNames) {
   return { recommendations, unused };
 }
 
-module.exports = { buildResults, formatUsageForDisplay };
+module.exports = { buildResults, formatUsageForDisplay, CONFIDENCE };

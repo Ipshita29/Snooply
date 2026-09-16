@@ -76,10 +76,12 @@ function printRecommendations(recommendations, unused) {
     return;
   }
 
-  // Same order as normal mode: known alternatives, then unused
+  // Same order as normal mode: known alternatives, then unused.
+  // The confidence tag is just the engine's existing internal signal,
+  // shown as-is - not a score, not something the CLI computes itself.
   for (const item of recommendations) {
     console.log(item.dependency);
-    console.log("  → known alternative");
+    console.log(`  → known alternative (${item.confidence})`);
     if (item.suggestedPackages.length > 0) {
       console.log(`  → ${item.used.join(", ")} → ${item.suggestedPackages.join(", ")}`);
     }
@@ -88,7 +90,7 @@ function printRecommendations(recommendations, unused) {
 
   for (const item of unused) {
     console.log(item.dependency);
-    console.log("  → unused\n");
+    console.log(`  → unused (${item.confidence})\n`);
   }
 }
 
@@ -350,8 +352,12 @@ async function main() {
     );
 
     // Select and run the right language analyzer(s) for this workspace
-    const { usage, usageByFile, files, skippedFiles } = await analyzeWorkspace(root, dependencies, excludedDirs);
-    const { recommendations, unused } = buildResults(usage, devDependencyNames);
+    const { usage, usageByFile, files, skippedFiles, matchConfidence } = await analyzeWorkspace(root, dependencies, excludedDirs);
+    const { recommendations, unused } = buildResults(usage, devDependencyNames, {
+      skippedFiles,
+      totalFiles: files.length,
+      matchConfidence,
+    });
 
     workspaces.push({
       label: getWorkspaceLabel(root, projectPath),

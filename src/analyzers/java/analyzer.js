@@ -42,7 +42,8 @@ function isWithinNamespace(importPath, namespace) {
 // Match an imported namespace back to every declared dependency it
 // could plausibly belong to. Tries the curated mapping first, then
 // falls back to the dependency's own groupId - which is often (not
-// always) the real import prefix.
+// always) the real import prefix, so a fallback-only match is flagged
+// as less certain than a curated one.
 //
 // More than one dependency can legitimately share a namespace (e.g.
 // spring-boot-starter-web and spring-context both live under
@@ -57,20 +58,23 @@ function resolveTrackedPackages(importPath, dependencyCoordinates) {
 
     const curated = ARTIFACT_TO_NAMESPACE[artifactId];
     if (curated && isWithinNamespace(importPath, curated)) {
-      matches.push(coordinate);
+      matches.push({ coordinate, viaFallback: false });
       continue;
     }
 
     if (groupId && isWithinNamespace(importPath, groupId)) {
-      matches.push(coordinate);
+      matches.push({ coordinate, viaFallback: true });
     }
   }
 
   return matches;
 }
 
-// Parse one Java file and find package usage
-function analyzeFile(code, dependencyCoordinates, usage) {
+// Parse one Java file and find package usage. `curatedDependencies`/
+// `fallbackDependencies` accumulate across the whole workspace, so the
+// caller can tell afterward which dependencies were ever confirmed by
+// a curated mapping versus only ever reached through the fallback.
+function analyzeFile(code, dependencyCoordinates, usage, curatedDependencies, fallbackDependencies) {
   const stripped = stripCodeNoise(code, { nestedBlockComments: false });
   const lines = stripped.split("\n");
 
@@ -105,11 +109,12 @@ function analyzeFile(code, dependencyCoordinates, usage) {
       continue; // standard library - never an external dependency
     }
 
-    const coordinates = resolveTrackedPackages(importPath, dependencyCoordinates);
+    const matches = resolveTrackedPackages(importPath, dependencyCoordinates);
     const evidence = isWildcard ? "*" : importPath.split(".").pop();
 
-    for (const coordinate of coordinates) {
+    for (const { coordinate, viaFallback } of matches) {
       usage[coordinate].add(evidence);
+      (viaFallback ? fallbackDependencies : curatedDependencies).add(coordinate);
     }
   }
 }
@@ -121,6 +126,8 @@ async function analyze(root, dependencies, excludedDirs = new Set()) {
   const usageByFile = {};
   const skippedFiles = [];
   const dependencyCoordinates = [...dependencies];
+  const curatedDependencies = new Set();
+  const fallbackDependencies = new Set();
 
   for (const dependency of dependencies) {
     usage[dependency] = new Set();
@@ -137,7 +144,7 @@ async function analyze(root, dependencies, excludedDirs = new Set()) {
 
     try {
       const code = fs.readFileSync(filePath, "utf-8");
-      analyzeFile(code, dependencyCoordinates, fileUsage);
+      analyzeFile(code, dependencyCoordinates, fileUsage, curatedDependencies, fallbackDependencies);
     } catch (error) {
       // File couldn't be read/analyzed - skip it, don't stop the run
       skippedFiles.push(filePath);
@@ -159,7 +166,16 @@ async function analyze(root, dependencies, excludedDirs = new Set()) {
     }
   }
 
-  return { language: "java", sourceFiles: files, usage, usageByFile, skippedFiles };
+  // A dependency reached only through the groupId fallback (never
+  // confirmed by the curated mapping) gets a "medium" confidence hint
+  const matchConfidence = {};
+  for (const coordinate of fallbackDependencies) {
+    if (!curatedDependencies.has(coordinate)) {
+      matchConfidence[coordinate] = "medium";
+    }
+  }
+
+  return { language: "java", sourceFiles: files, usage, usageByFile, skippedFiles, matchConfidence };
 }
 
 // This analyzer applies if the workspace has any .java files

@@ -234,7 +234,6 @@ function createBabelAnalyzer({ name, extensions, getParserPlugins, shouldAnalyze
 
     for (let i = 0; i < files.length; i++) {
       const filePath = files[i];
-      const code = fs.readFileSync(filePath, "utf-8");
 
       const fileUsage = {};
       for (const dependency of dependencies) {
@@ -242,9 +241,10 @@ function createBabelAnalyzer({ name, extensions, getParserPlugins, shouldAnalyze
       }
 
       try {
+        const code = fs.readFileSync(filePath, "utf-8");
         analyzeFile(code, dependencies, fileUsage, getParserPlugins(filePath));
       } catch (error) {
-        // Skip files that fail to parse
+        // File couldn't be read or parsed - skip it, don't stop the run
         skippedFiles.push(filePath);
         continue;
       }
