@@ -189,6 +189,31 @@ function isUsed(usage, dep) {
     assert.ok(!isUsed(usage, "pandas"));
   });
 
+  await test("Python: distribution/import mismatch (Pillow -> PIL)", async () => {
+    const dir = makeFixture({
+      "requirements.txt": "Pillow\n",
+      "main.py": "from PIL import Image\nImage.open('x.png')\n",
+    });
+    assert.ok(isUsed(await usageFor(dir), "Pillow"));
+  });
+
+  await test("Python: distribution/import mismatch (scikit-learn -> sklearn)", async () => {
+    const dir = makeFixture({
+      "requirements.txt": "scikit-learn\n",
+      "main.py": "import sklearn\nsklearn.__version__\n",
+    });
+    assert.ok(isUsed(await usageFor(dir), "scikit-learn"));
+  });
+
+  await test("Python: double-level relative import stays local", async () => {
+    const dir = makeFixture({
+      "requirements.txt": "requests\n",
+      "pkg/mod.py": "from ..shared import bar\n",
+      "shared.py": "def bar(): pass\n",
+    });
+    assert.ok(!isUsed(await usageFor(dir), "requests"));
+  });
+
   // ================= Java =================
 
   await test("Java: Maven coordinate -> package namespace (gson)", async () => {
@@ -240,6 +265,28 @@ function isUsed(usage, dep) {
       "src/main/java/App.java": `import org.springframework.stereotype.Component;\nclass App {}`,
     });
     assert.ok(isUsed(await usageFor(dir), "org.springframework:spring-context"));
+  });
+
+  await test("Java: Gradle Kotlin DSL (build.gradle.kts) coordinate -> package namespace", async () => {
+    const dir = makeFixture({
+      "build.gradle.kts": `dependencies {\n    implementation("com.google.code.gson:gson:2.10.1")\n}\n`,
+      "src/main/java/App.java": `import com.google.gson.Gson;\nclass App {}`,
+    });
+    assert.ok(isUsed(await usageFor(dir), "com.google.code.gson:gson"));
+  });
+
+  // Note: the groupId fallback intentionally credits every subpackage
+  // under a matched groupId (e.g. com.example.* all count for a
+  // com.example:* dependency) - that's a deliberate, documented
+  // trade-off (see ARTIFACT_TO_NAMESPACE / resolveTrackedPackages),
+  // not a false match. The actual boundary risk is a sibling groupId
+  // that merely shares a string prefix without a real "." boundary.
+  await test("Java: package boundary safety (com.example vs com.example2 groupId)", async () => {
+    const dir = makeFixture({
+      "pom.xml": `<project><dependencies><dependency><groupId>com.example</groupId><artifactId>foo</artifactId></dependency></dependencies></project>`,
+      "src/main/java/App.java": `import com.example2.Widget;\nclass App {}`,
+    });
+    assert.ok(!isUsed(await usageFor(dir), "com.example:foo"));
   });
 
   // ================= Go =================
@@ -310,6 +357,15 @@ function isUsed(usage, dep) {
     assert.ok(!isUsed(await usageFor(dir), "github.com/example/foo"));
   });
 
+  await test("Go: vendor directory is excluded from source scanning", async () => {
+    const dir = makeFixture({
+      "go.mod": `module example.com/app\n\nrequire github.com/gin-gonic/gin v1.10.0\n`,
+      "main.go": `package main\nfunc main() {}`,
+      "vendor/github.com/gin-gonic/gin/gin.go": `package gin\nimport "github.com/gin-gonic/gin"\nfunc Default() {}`,
+    });
+    assert.ok(!isUsed(await usageFor(dir), "github.com/gin-gonic/gin"));
+  });
+
   // ================= Rust =================
 
   await test("Rust: normal crate", async () => {
@@ -363,6 +419,48 @@ function isUsed(usage, dep) {
     assert.ok(!isUsed(usage, "unused-crate"));
   });
 
+  await test("Rust: nested grouped use", async () => {
+    const dir = makeFixture({
+      "Cargo.toml": `[dependencies]\nserde = "1.0"\n`,
+      "src/main.rs": `use serde::{de::{self, Deserializer}, Serialize};\nfn main() {}`,
+    });
+    assert.ok(isUsed(await usageFor(dir), "serde"));
+  });
+
+  await test("Rust: self:: local import excluded", async () => {
+    const dir = makeFixture({
+      "Cargo.toml": `[dependencies]\nserde = "1.0"\n`,
+      "src/main.rs": `mod config;\nuse self::config::Config;\nfn main() {}`,
+      "src/config.rs": `pub struct Config;`,
+    });
+    assert.ok(!isUsed(await usageFor(dir), "serde"));
+  });
+
+  await test("Rust: super:: local import excluded", async () => {
+    const dir = makeFixture({
+      "Cargo.toml": `[dependencies]\nserde = "1.0"\n`,
+      "src/main.rs": `mod util;\nfn main() {}`,
+      "src/util.rs": `use super::helper;\nfn helper() {}`,
+    });
+    assert.ok(!isUsed(await usageFor(dir), "serde"));
+  });
+
+  await test("Rust: core:: standard library excluded", async () => {
+    const dir = makeFixture({
+      "Cargo.toml": `[dependencies]\nserde = "1.0"\n`,
+      "src/main.rs": `use core::mem::swap;\nfn main() {}`,
+    });
+    assert.ok(!isUsed(await usageFor(dir), "serde"));
+  });
+
+  await test("Rust: alloc:: standard library excluded", async () => {
+    const dir = makeFixture({
+      "Cargo.toml": `[dependencies]\nserde = "1.0"\n`,
+      "src/main.rs": `use alloc::vec::Vec;\nfn main() {}`,
+    });
+    assert.ok(!isUsed(await usageFor(dir), "serde"));
+  });
+
   // ================= Mixed-language / multi-package =================
 
   await test("Mixed languages combine in one workspace", async () => {
@@ -391,6 +489,56 @@ function isUsed(usage, dep) {
     const backendUsage = await usageFor(path.join(dir, "backend-python"));
     assert.ok(isUsed(frontendUsage, "axios"));
     assert.ok(!isUsed(backendUsage, "axios"));
+  });
+
+  await test("Monorepo: same-ecosystem client/server packages stay isolated", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "snooply-test-"));
+    fs.mkdirSync(path.join(dir, "client"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "server"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "client", "package.json"), JSON.stringify({ dependencies: { axios: "1.0.0" } }));
+    fs.writeFileSync(path.join(dir, "client", "index.js"), `const axios = require("axios"); axios.get("/x");`);
+    // Same npm dependency declared on the server side, but never imported there
+    fs.writeFileSync(path.join(dir, "server", "package.json"), JSON.stringify({ dependencies: { axios: "1.0.0" } }));
+    fs.writeFileSync(path.join(dir, "server", "index.js"), `console.log("hi");`);
+
+    const clientUsage = await usageFor(path.join(dir, "client"));
+    const serverUsage = await usageFor(path.join(dir, "server"));
+    assert.ok(isUsed(clientUsage, "axios"));
+    assert.ok(!isUsed(serverUsage, "axios"));
+  });
+
+  await test("Monorepo: apps/web + apps/admin + packages/shared each analyze independently", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "snooply-test-"));
+    fs.mkdirSync(path.join(dir, "apps", "web", "src"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "apps", "admin", "src"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "packages", "shared", "src"), { recursive: true });
+
+    fs.writeFileSync(
+      path.join(dir, "apps", "web", "package.json"),
+      JSON.stringify({ dependencies: { react: "18.2.0", lodash: "1.0.0" } })
+    );
+    fs.writeFileSync(
+      path.join(dir, "apps", "web", "src", "index.js"),
+      `const React = require("react"); React.createElement("div");`
+    );
+
+    fs.writeFileSync(path.join(dir, "apps", "admin", "package.json"), JSON.stringify({ dependencies: { axios: "1.0.0" } }));
+    fs.writeFileSync(path.join(dir, "apps", "admin", "src", "index.js"), `const axios = require("axios"); axios.get("/x");`);
+
+    fs.writeFileSync(path.join(dir, "packages", "shared", "package.json"), JSON.stringify({ dependencies: { dayjs: "1.0.0" } }));
+    fs.writeFileSync(path.join(dir, "packages", "shared", "src", "index.js"), `const dayjs = require("dayjs"); dayjs();`);
+
+    const webUsage = await usageFor(path.join(dir, "apps", "web"));
+    const adminUsage = await usageFor(path.join(dir, "apps", "admin"));
+    const sharedUsage = await usageFor(path.join(dir, "packages", "shared"));
+
+    assert.ok(isUsed(webUsage, "react"));
+    assert.ok(!isUsed(webUsage, "lodash"), "lodash is declared in apps/web but never imported there");
+    assert.ok(isUsed(adminUsage, "axios"));
+    assert.ok(isUsed(sharedUsage, "dayjs"));
+    // No cross-boundary leakage between the three packages
+    assert.ok(!isUsed(adminUsage, "react"));
+    assert.ok(!isUsed(sharedUsage, "axios"));
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

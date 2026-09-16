@@ -100,6 +100,18 @@ function restoreReadable(paths) {
     assert.strictEqual(finding.hasAlternative, true);
   });
 
+  await test("HIGH: known alternative for lodash throttle usage", async () => {
+    const dir = makeFixture({
+      "package.json": JSON.stringify({ dependencies: { lodash: "1.0.0" } }),
+      "index.js": "const { throttle } = require('lodash'); throttle();",
+    });
+    const result = await findingsFor(dir);
+    const finding = findingFor(result, "lodash");
+    assert.ok(finding);
+    assert.strictEqual(finding.confidence, "HIGH");
+    assert.strictEqual(finding.hasAlternative, true);
+  });
+
   // ================= MEDIUM confidence =================
 
   await test("MEDIUM: unused conclusion when a minority of files failed to parse", async () => {

@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node ./src/index.js",
-    "test": "node ./test/matching.test.js && node ./test/package-managers.test.js && node ./test/parser-accuracy.test.js && node ./test/confidence.test.js"
+    "test": "node ./test/matching.test.js && node ./test/package-managers.test.js && node ./test/parser-accuracy.test.js && node ./test/confidence.test.js && node ./test/javascript-typescript.test.js && node ./test/error-handling.test.js && node ./test/performance.test.js && node ./test/cli.test.js"
   },
   "keywords": [
     "dependencies",
