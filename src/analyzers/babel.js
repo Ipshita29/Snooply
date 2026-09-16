@@ -6,7 +6,7 @@
 
 const fs = require("fs");
 const parser = require("@babel/parser");
-const { findSourceFiles } = require("../../core/project");
+const { findSourceFiles } = require("../project");
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));

@@ -6,10 +6,10 @@ const readline = require("readline");
 const http = require("http");
 const { spawn } = require("child_process");
 
-const { findWorkspaceRoots, getWorkspaceLabel } = require("./core/project");
-const { readManifest, uninstallCommandFor, installCommandFor, languageFor } = require("./core/package-managers");
-const { analyzeWorkspace } = require("./core/analyzer");
-const { buildResults, formatUsageForDisplay } = require("./core/recommendations");
+const { findWorkspaceRoots, getWorkspaceLabel } = require("./project");
+const { readManifest, uninstallCommandFor, installCommandFor, languageFor } = require("./package-managers");
+const { analyzeWorkspace } = require("./analyze");
+const { buildResults, formatUsageForDisplay } = require("./recommendations");
 
 // --- Loading animation ---
 // Rotates a single line of status text while Snooply works.

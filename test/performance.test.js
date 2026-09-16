@@ -12,7 +12,7 @@ const os = require("os");
 const path = require("path");
 const assert = require("assert");
 
-const { analyzeWorkspace } = require("../src/core/analyzer");
+const { analyzeWorkspace } = require("../src/analyze");
 
 let passed = 0;
 let failed = 0;

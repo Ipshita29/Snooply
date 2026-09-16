@@ -1,6 +1,6 @@
 // TypeScript/TSX analyzer.
 // A thin config over the shared Babel engine - see
-// src/analyzers/shared/babel-analyzer.js for the actual parsing logic.
+// src/analyzers/babel.js for the actual parsing logic.
 //
 // .tsx files need the jsx plugin too. Plain .ts files must NOT enable
 // it - TypeScript's `<Type>value` cast syntax collides with JSX there.
@@ -9,7 +9,7 @@
 // yet. A file using them will fail to parse and show up as skipped -
 // add the decorators Babel plugin later if this becomes a real need.
 
-const { createBabelAnalyzer } = require("../shared/babel-analyzer");
+const { createBabelAnalyzer } = require("./babel");
 
 module.exports = createBabelAnalyzer({
   name: "typescript",

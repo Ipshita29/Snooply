@@ -10,8 +10,8 @@
 
 const fs = require("fs");
 const path = require("path");
-const { findSourceFiles } = require("../../core/project");
-const { stripCodeNoise } = require("../shared/strip-code-noise");
+const { findSourceFiles } = require("../project");
+const { stripCodeNoise } = require("./helpers");
 
 const EXTENSIONS = [".go"];
 

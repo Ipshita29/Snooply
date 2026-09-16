@@ -16,7 +16,7 @@ const {
   readManifest,
   uninstallCommandFor,
   installCommandFor,
-} = require("../src/core/package-managers");
+} = require("../src/package-managers");
 
 let passed = 0;
 let failed = 0;

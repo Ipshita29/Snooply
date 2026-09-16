@@ -1,8 +1,8 @@
 // JavaScript/JSX analyzer.
 // A thin config over the shared Babel engine - see
-// src/analyzers/shared/babel-analyzer.js for the actual parsing logic.
+// src/analyzers/babel.js for the actual parsing logic.
 
-const { createBabelAnalyzer } = require("../shared/babel-analyzer");
+const { createBabelAnalyzer } = require("./babel");
 
 module.exports = createBabelAnalyzer({
   name: "javascript",

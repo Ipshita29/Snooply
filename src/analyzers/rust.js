@@ -9,8 +9,8 @@
 // argument) is never mistaken for a real import.
 
 const fs = require("fs");
-const { findSourceFiles } = require("../../core/project");
-const { stripCodeNoise } = require("../shared/strip-code-noise");
+const { findSourceFiles } = require("../project");
+const { stripCodeNoise } = require("./helpers");
 
 const EXTENSIONS = [".rs"];
 

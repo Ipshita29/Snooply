@@ -9,7 +9,7 @@
 // "import"-shaped text inside them is never mistaken for a real import.
 
 const fs = require("fs");
-const { findSourceFiles } = require("../../core/project");
+const { findSourceFiles } = require("../project");
 
 const EXTENSIONS = [".py"];
 

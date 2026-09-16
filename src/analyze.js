@@ -6,12 +6,12 @@
 // with both .jsx and .tsx files runs both and their results merge.
 
 const { findExtensionsPresent } = require("./project");
-const javascriptAnalyzer = require("../analyzers/javascript/analyzer");
-const typescriptAnalyzer = require("../analyzers/typescript/analyzer");
-const pythonAnalyzer = require("../analyzers/python/analyzer");
-const javaAnalyzer = require("../analyzers/java/analyzer");
-const goAnalyzer = require("../analyzers/go/analyzer");
-const rustAnalyzer = require("../analyzers/rust/analyzer");
+const javascriptAnalyzer = require("./analyzers/javascript");
+const typescriptAnalyzer = require("./analyzers/typescript");
+const pythonAnalyzer = require("./analyzers/python");
+const javaAnalyzer = require("./analyzers/java");
+const goAnalyzer = require("./analyzers/go");
+const rustAnalyzer = require("./analyzers/rust");
 
 const ANALYZERS = [javascriptAnalyzer, typescriptAnalyzer, pythonAnalyzer, javaAnalyzer, goAnalyzer, rustAnalyzer];
 

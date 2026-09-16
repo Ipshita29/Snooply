@@ -12,9 +12,9 @@ const os = require("os");
 const path = require("path");
 const assert = require("assert");
 
-const { readManifest } = require("../src/core/package-managers");
-const { analyzeWorkspace } = require("../src/core/analyzer");
-const { IGNORED_DIRECTORIES } = require("../src/core/project");
+const { readManifest } = require("../src/package-managers");
+const { analyzeWorkspace } = require("../src/analyze");
+const { IGNORED_DIRECTORIES } = require("../src/project");
 
 let passed = 0;
 let failed = 0;
