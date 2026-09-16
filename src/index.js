@@ -7,7 +7,7 @@ const http = require("http");
 const { spawn } = require("child_process");
 
 const { findWorkspaceRoots, getWorkspaceLabel } = require("./core/project");
-const { readManifest, uninstallCommandFor, installCommandFor } = require("./core/package-managers");
+const { readManifest, uninstallCommandFor, installCommandFor, languageFor } = require("./core/package-managers");
 const { analyzeWorkspace } = require("./core/analyzer");
 const { buildResults, formatUsageForDisplay } = require("./core/recommendations");
 
@@ -420,8 +420,10 @@ async function main() {
     const withEvidence = (item, kind) => {
       const fileEntries = ws.usageByFile[item.dependency] || [];
       // Real package manager for this dependency (npm, pip, ...) - used
-      // to build a real uninstall/install command, not a guessed one
-      const packageManager = ws.packageManagers[item.dependency] || "npm";
+      // to build a real uninstall/install command, not a guessed one.
+      // Always set by readManifest; command/language helpers below
+      // already degrade gracefully if it's ever missing.
+      const packageManager = ws.packageManagers[item.dependency];
 
       return {
         ...item,
@@ -435,6 +437,7 @@ async function main() {
         dependenciesChecked: ws.dependencies.size,
         dependenciesList: [...ws.dependencies],
         packageManager,
+        language: languageFor(packageManager),
         uninstallCommand: uninstallCommandFor(packageManager, item.dependency),
         installCommand: item.suggestedPackages.length > 0
           ? installCommandFor(packageManager, item.suggestedPackages)

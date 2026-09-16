@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node ./src/index.js",
-    "test": "node ./test/matching.test.js"
+    "test": "node ./test/matching.test.js && node ./test/package-managers.test.js"
   },
   "keywords": [
     "dependencies",

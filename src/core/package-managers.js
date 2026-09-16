@@ -1,6 +1,10 @@
-// Package manager <-> manifest file mapping.
-// npm, Python (pip), Maven, and Gradle are implemented today. A future
-// package manager (Cargo, Go modules, ...) registers here the same way.
+// Package manager <-> manifest file mapping. This is the single
+// source of truth for every package manager Snooply understands - its
+// manifest files, which language(s) it belongs to, its dependency
+// reader, and (where one safely exists) its uninstall/install command.
+// A future package manager (Composer, Bundler, ...) registers here the
+// same way; nothing else in the codebase should hardcode manager ids,
+// manifest filenames, or command strings.
 
 const fs = require("fs");
 const path = require("path");
@@ -9,18 +13,26 @@ const PACKAGE_MANAGERS = [
   {
     id: "npm",
     manifestFiles: ["package.json"],
+    // An npm workspace can hold both JS and TS source; javascript is
+    // the representative language attached to dependency metadata.
+    sourceLanguages: ["javascript", "typescript"],
+    read: (root) => readNpmManifest(root),
     uninstallCommand: (name) => `npm uninstall ${name}`,
     installCommand: (names) => `npm install ${names.join(" ")}`,
   },
   {
     id: "pip",
     manifestFiles: ["requirements.txt", "pyproject.toml"],
+    sourceLanguages: ["python"],
+    read: (root) => readPythonManifest(root),
     uninstallCommand: (name) => `pip uninstall ${name}`,
     installCommand: (names) => `pip install ${names.join(" ")}`,
   },
   {
     id: "maven",
     manifestFiles: ["pom.xml"],
+    sourceLanguages: ["java"],
+    read: (root) => readMavenManifest(root),
     // No safe, universal one-line Maven CLI command removes a
     // dependency from pom.xml - that's a manual file edit. Leaving
     // uninstallCommand/installCommand undefined rather than guessing.
@@ -28,12 +40,16 @@ const PACKAGE_MANAGERS = [
   {
     id: "gradle",
     manifestFiles: ["build.gradle", "build.gradle.kts"],
+    sourceLanguages: ["java"],
+    read: (root) => readGradleManifest(root),
     // Same reasoning as Maven - removing a Gradle dependency means
     // editing the build file, there's no safe CLI equivalent to offer.
   },
   {
     id: "go",
     manifestFiles: ["go.mod"],
+    sourceLanguages: ["go"],
+    read: (root) => readGoManifest(root),
     // Removing a Go dependency means editing go.mod (and usually
     // running `go mod tidy`, which Snooply won't execute) - no safe
     // one-line command to offer here either.
@@ -41,18 +57,52 @@ const PACKAGE_MANAGERS = [
   {
     id: "cargo",
     manifestFiles: ["Cargo.toml"],
+    sourceLanguages: ["rust"],
+    read: (root) => readCargoManifest(root),
     // Same reasoning as the others - removing a crate means editing
     // Cargo.toml, there's no safe one-line `cargo` command to offer.
   },
 ];
+
+// Does this manager's manifest exist in this directory?
+function managerAppliesTo(manager, root) {
+  return manager.manifestFiles.some((file) => fs.existsSync(path.join(root, file)));
+}
 
 // Manifest filenames Snooply knows how to recognize a workspace by
 function manifestFileNames() {
   return PACKAGE_MANAGERS.flatMap((manager) => manager.manifestFiles);
 }
 
+// Look up a manager's metadata by id. Returns null for an unknown id -
+// never guesses at a manager that isn't actually registered.
+function getPackageManager(id) {
+  return PACKAGE_MANAGERS.find((manager) => manager.id === id) || null;
+}
+
+// Which package manager governs a directory, based on its manifest
+// file(s). Returns null if none is present. If a directory has more
+// than one manifest (rare - an npm + a Python service in the same
+// folder), this returns the first match; `readManifest` below is the
+// authoritative source for that case, since it reads every manifest
+// present and keeps per-dependency attribution.
+function detectPackageManager(root) {
+  const manager = PACKAGE_MANAGERS.find((candidate) => managerAppliesTo(candidate, root));
+  return manager ? manager.id : null;
+}
+
+// Primary language associated with a package manager. Used to tag
+// dependency metadata; returns null for an unknown id.
+function languageFor(packageManagerId) {
+  const manager = getPackageManager(packageManagerId);
+  return manager ? manager.sourceLanguages[0] : null;
+}
+
+// Internal-only lookup for building commands. Unlike getPackageManager,
+// this always returns something - it's only ever called with an id
+// Snooply itself already assigned, so a safe npm fallback is fine here.
 function findPackageManager(id) {
-  return PACKAGE_MANAGERS.find((manager) => manager.id === id) || PACKAGE_MANAGERS[0];
+  return getPackageManager(id) || PACKAGE_MANAGERS[0];
 }
 
 // Build the real remove/add command for a dependency, based on which
@@ -365,58 +415,20 @@ function readManifest(root) {
   const packageManagers = {};
   let found = false;
 
-  if (fs.existsSync(path.join(root, "package.json"))) {
-    const npm = readNpmManifest(root);
-    found = true;
-    for (const dep of npm.dependencies) {
-      dependencies.add(dep);
-      packageManagers[dep] = "npm";
+  for (const manager of PACKAGE_MANAGERS) {
+    if (!managerAppliesTo(manager, root)) {
+      continue;
     }
-    for (const dep of npm.devDependencyNames) devDependencyNames.add(dep);
-  }
 
-  if (fs.existsSync(path.join(root, "requirements.txt")) || fs.existsSync(path.join(root, "pyproject.toml"))) {
-    const python = readPythonManifest(root);
+    const result = manager.read(root);
     found = true;
-    for (const dep of python.dependencies) {
+
+    for (const dep of result.dependencies) {
       dependencies.add(dep);
-      packageManagers[dep] = "pip";
+      packageManagers[dep] = manager.id;
     }
-  }
-
-  if (fs.existsSync(path.join(root, "pom.xml"))) {
-    const maven = readMavenManifest(root);
-    found = true;
-    for (const dep of maven.dependencies) {
-      dependencies.add(dep);
-      packageManagers[dep] = "maven";
-    }
-  }
-
-  if (fs.existsSync(path.join(root, "build.gradle")) || fs.existsSync(path.join(root, "build.gradle.kts"))) {
-    const gradle = readGradleManifest(root);
-    found = true;
-    for (const dep of gradle.dependencies) {
-      dependencies.add(dep);
-      packageManagers[dep] = "gradle";
-    }
-  }
-
-  if (fs.existsSync(path.join(root, "go.mod"))) {
-    const go = readGoManifest(root);
-    found = true;
-    for (const dep of go.dependencies) {
-      dependencies.add(dep);
-      packageManagers[dep] = "go";
-    }
-  }
-
-  if (fs.existsSync(path.join(root, "Cargo.toml"))) {
-    const cargo = readCargoManifest(root);
-    found = true;
-    for (const dep of cargo.dependencies) {
-      dependencies.add(dep);
-      packageManagers[dep] = "cargo";
+    for (const dep of result.devDependencyNames) {
+      devDependencyNames.add(dep);
     }
   }
 
@@ -429,6 +441,9 @@ function readManifest(root) {
 
 module.exports = {
   manifestFileNames,
+  detectPackageManager,
+  getPackageManager,
+  languageFor,
   readNpmManifest,
   readPythonManifest,
   readMavenManifest,
