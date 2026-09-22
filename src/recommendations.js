@@ -117,8 +117,12 @@ function findKnownAlternative(dependency, namedUsage) {
   return { packages };
 }
 
-// Decide if a dependency is worth flagging
-function evaluateDependency(name, used, isDevDependency) {
+// Decide if a dependency is worth flagging. `hasNonImportEvidence` is
+// real evidence collected outside source imports (a package-manager
+// script, or a real CLI invocation in a Makefile/Dockerfile/CI config/
+// etc.) - a dependency with no import but a genuine command/script
+// reference is used, not unused; "no import" alone is never enough.
+function evaluateDependency(name, used, isDevDependency, hasNonImportEvidence) {
   const namedUsage = [...used].filter((marker) => !NON_SPECIFIC_MARKERS.has(marker));
 
   if (used.size === 0) {
@@ -127,10 +131,21 @@ function evaluateDependency(name, used, isDevDependency) {
       return { status: "NO_FINDING" };
     }
 
+    if (hasNonImportEvidence) {
+      // Invoked as a script/CLI command rather than imported - still used
+      return { status: "NO_FINDING" };
+    }
+
+    // A name that looks like a framework/build/runtime tool is weaker
+    // grounds for "unused" than an ordinary library with the same lack
+    // of evidence - such packages are routinely used without ever being
+    // imported or appearing in a script Snooply can see (a config file
+    // it doesn't parse, a peer dependency, etc.)
     return {
       status: "UNUSED",
-      reason: `Snooply couldn't find \`${name}\` used anywhere in your source files.`,
-      suggestion: "If you no longer need it, you can remove it.",
+      reason: `Snooply found no import, script, or command evidence that \`${name}\` is used.`,
+      suggestion: "Review before removing - it may still be used indirectly, as a framework/runtime dependency, or by a tool Snooply doesn't scan.",
+      weakEvidence: isFrameworkPackage(name),
     };
   }
 
@@ -187,13 +202,16 @@ function formatUsageForDisplay(used) {
 
 // Cautious wording added to a MEDIUM-confidence finding - never claim
 // more certainty than the evidence actually supports.
-function withCaveat(reason, coverage, mapping) {
+function withCaveat(reason, coverage, mapping, weakEvidence) {
   const notes = [];
   if (coverage === CONFIDENCE.MEDIUM) {
     notes.push("Some source files in this project couldn't be checked, so this may not be fully accurate.");
   }
   if (mapping === CONFIDENCE.MEDIUM) {
     notes.push("This is based on a less direct package-to-import match.");
+  }
+  if (weakEvidence) {
+    notes.push("Its name suggests it may be a framework, build tool, or runtime dependency that isn't always directly imported.");
   }
   return notes.length > 0 ? `${reason} ${notes.join(" ")}` : reason;
 }
@@ -205,7 +223,7 @@ function withCaveat(reason, coverage, mapping) {
 // a per-dependency confidence hint. Nothing here is invented; it's
 // existing evidence, just used to decide how much to trust a finding.
 function buildResults(usage, devDependencyNames, context = {}) {
-  const { skippedFiles = [], totalFiles = 0, matchConfidence = {} } = context;
+  const { skippedFiles = [], totalFiles = 0, matchConfidence = {}, evidence = {} } = context;
   const coverage = parseCoverageConfidence(skippedFiles.length, totalFiles);
 
   const recommendations = [];
@@ -216,7 +234,8 @@ function buildResults(usage, devDependencyNames, context = {}) {
       continue;
     }
 
-    const result = evaluateDependency(dependency, used, devDependencyNames.has(dependency));
+    const hasNonImportEvidence = (evidence[dependency] || []).length > 0;
+    const result = evaluateDependency(dependency, used, devDependencyNames.has(dependency), hasNonImportEvidence);
 
     if (result.status === "NO_FINDING") {
       continue;
@@ -225,7 +244,13 @@ function buildResults(usage, devDependencyNames, context = {}) {
     // A dependency that already has usage evidence is never "unused",
     // so a less-direct mapping only matters for a KNOWN_ALTERNATIVE claim
     const mapping = matchConfidence[dependency] === "medium" ? CONFIDENCE.MEDIUM : CONFIDENCE.HIGH;
-    const confidence = result.status === "UNUSED" ? coverage : lowestConfidence(coverage, mapping);
+    // A framework/build/runtime-shaped name with zero evidence is less
+    // certain grounds for "unused" than an ordinary library in the same
+    // position - such tools are routinely used without ever showing up
+    // in anything Snooply can scan.
+    const weakEvidenceLevel = result.weakEvidence ? CONFIDENCE.MEDIUM : CONFIDENCE.HIGH;
+    const confidence =
+      result.status === "UNUSED" ? lowestConfidence(coverage, weakEvidenceLevel) : lowestConfidence(coverage, mapping);
 
     // Not enough evidence to say anything useful - stay quiet rather
     // than show a noisy, unreliable "maybe" recommendation
@@ -233,7 +258,10 @@ function buildResults(usage, devDependencyNames, context = {}) {
       continue;
     }
 
-    const reason = confidence === CONFIDENCE.MEDIUM ? withCaveat(result.reason, coverage, mapping) : result.reason;
+    const reason =
+      confidence === CONFIDENCE.MEDIUM
+        ? withCaveat(result.reason, coverage, result.status === "KNOWN_ALTERNATIVE" ? mapping : CONFIDENCE.HIGH, result.weakEvidence)
+        : result.reason;
 
     if (result.status === "KNOWN_ALTERNATIVE") {
       recommendations.push({

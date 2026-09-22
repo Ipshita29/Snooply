@@ -6,6 +6,7 @@
 // with both .jsx and .tsx files runs both and their results merge.
 
 const { findExtensionsPresent } = require("./project");
+const { collectNonImportEvidence } = require("./usage-evidence");
 const javascriptAnalyzer = require("./analyzers/javascript");
 const typescriptAnalyzer = require("./analyzers/typescript");
 const pythonAnalyzer = require("./analyzers/python");
@@ -58,7 +59,12 @@ async function analyzeWorkspace(root, dependencies, excludedDirs = new Set()) {
     }
   }
 
-  return { languages, files, skippedFiles, usage, usageByFile, matchConfidence };
+  // Usage evidence beyond source imports - a package script or a real
+  // CLI invocation in a Makefile/Dockerfile/CI config/etc. "No import
+  // found" alone is never enough to call a dependency unused.
+  const nonImportEvidence = collectNonImportEvidence(root, dependencies, excludedDirs);
+
+  return { languages, files, skippedFiles, usage, usageByFile, matchConfidence, nonImportEvidence };
 }
 
 module.exports = { analyzeWorkspace, selectAnalyzers };

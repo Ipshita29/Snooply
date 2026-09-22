@@ -131,6 +131,22 @@ function isUsed(usage, dep) {
     assert.ok(isUsed(await usageFor(dir), "requests"));
   });
 
+  await test("Python: importlib.import_module dynamic import counts as real usage", async () => {
+    const dir = makeFixture({
+      "requirements.txt": "gitpython\n",
+      "main.py": "import importlib\nmod = importlib.import_module('git')\n",
+    });
+    assert.ok(isUsed(await usageFor(dir), "gitpython"));
+  });
+
+  await test("Python: importlib.import_module mentioned inside a comment does not count", async () => {
+    const dir = makeFixture({
+      "requirements.txt": "gitpython\n",
+      "main.py": "# importlib.import_module('git') is just an example\nprint(1)\n",
+    });
+    assert.ok(!isUsed(await usageFor(dir), "gitpython"));
+  });
+
   // ================= Java =================
 
   await test("Java: real import", async () => {

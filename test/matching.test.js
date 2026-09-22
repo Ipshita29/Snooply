@@ -214,6 +214,38 @@ function isUsed(usage, dep) {
     assert.ok(!isUsed(await usageFor(dir), "requests"));
   });
 
+  await test("Python: distribution/import mismatch (GitPython -> git)", async () => {
+    const dir = makeFixture({
+      "requirements.txt": "gitpython\n",
+      "main.py": "from git import Repo\nRepo.clone_from('x', 'y')\n",
+    });
+    assert.ok(isUsed(await usageFor(dir), "gitpython"));
+  });
+
+  await test("Python: distribution/import mismatch (fpdf2 -> fpdf)", async () => {
+    const dir = makeFixture({
+      "requirements.txt": "fpdf2\n",
+      "main.py": "from fpdf import FPDF\npdf = FPDF()\n",
+    });
+    assert.ok(isUsed(await usageFor(dir), "fpdf2"));
+  });
+
+  await test("Python: import alias still resolves to the declared dependency", async () => {
+    const dir = makeFixture({
+      "requirements.txt": "gitpython\n",
+      "main.py": "import git as g\ng.Repo\n",
+    });
+    assert.ok(isUsed(await usageFor(dir), "gitpython"));
+  });
+
+  await test("Python: importlib.import_module dynamic import resolves to the declared dependency", async () => {
+    const dir = makeFixture({
+      "requirements.txt": "gitpython\n",
+      "main.py": "import importlib\nmod = importlib.import_module('git')\n",
+    });
+    assert.ok(isUsed(await usageFor(dir), "gitpython"));
+  });
+
   // ================= Java =================
 
   await test("Java: Maven coordinate -> package namespace (gson)", async () => {

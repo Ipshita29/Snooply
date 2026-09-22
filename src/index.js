@@ -366,11 +366,12 @@ async function main() {
     );
 
     // Select and run the right language analyzer(s) for this workspace
-    const { usage, usageByFile, files, skippedFiles, matchConfidence } = await analyzeWorkspace(root, dependencies, excludedDirs);
+    const { usage, usageByFile, files, skippedFiles, matchConfidence, nonImportEvidence } = await analyzeWorkspace(root, dependencies, excludedDirs);
     const { recommendations, unused } = buildResults(usage, devDependencyNames, {
       skippedFiles,
       totalFiles: files.length,
       matchConfidence,
+      evidence: nonImportEvidence,
     });
 
     workspaces.push({

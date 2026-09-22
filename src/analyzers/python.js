@@ -26,6 +26,8 @@ const IMPORT_TO_DISTRIBUTION = {
   sklearn: "scikit-learn",
   cv2: "opencv-python",
   yaml: "PyYAML",
+  git: "gitpython",
+  fpdf: "fpdf2",
 };
 
 // A practical (not exhaustive) list of Python standard-library
@@ -162,10 +164,27 @@ function hasUnclosedParen(text) {
   return text.includes("(") && !text.includes(")");
 }
 
+// Blank only "#"-to-end-of-line comments, leaving string content
+// intact. Used just for the dynamic-import check below, which needs
+// the literal module-name string preserved - unlike the main import
+// scan, which strips strings too since it never needs to read one.
+function stripPythonLineComments(code) {
+  return code
+    .split("\n")
+    .map((line) => {
+      const hashIndex = line.indexOf("#");
+      return hashIndex === -1 ? line : line.slice(0, hashIndex);
+    })
+    .join("\n");
+}
+
 // Parse one Python file and find package usage
 function analyzeFile(code, dependencyLookup, usage) {
   const stripped = stripPythonNoise(code);
   const lines = stripped.split("\n");
+  // A parallel version with comments (but not strings) removed, so the
+  // dynamic-import check below can still read the literal module name
+  const commentFreeLines = stripPythonLineComments(code).split("\n");
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -204,6 +223,18 @@ function analyzeFile(code, dependencyLookup, usage) {
         if (pkg) {
           usage[pkg].add("default");
         }
+      }
+      continue;
+    }
+
+    // importlib.import_module("x") / import_module('x.y') - a dynamic
+    // import naming its module as a literal string, common enough to
+    // recognize without a full expression evaluator
+    const dynamicMatch = (commentFreeLines[i] || "").match(/\bimportlib\s*\.\s*import_module\s*\(\s*["']([\w.]+)["']/);
+    if (dynamicMatch) {
+      const pkg = resolveTrackedPackage(dynamicMatch[1], dependencyLookup);
+      if (pkg) {
+        usage[pkg].add("dynamic import");
       }
     }
   }

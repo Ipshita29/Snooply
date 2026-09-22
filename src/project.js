@@ -4,6 +4,7 @@
 const fs = require("fs");
 const path = require("path");
 const { manifestFileNames } = require("./package-managers");
+const { loadGitignoreRules, isIgnoredByGitignore, isNestedRepoBoundary } = require("./ignore");
 
 const IGNORED_DIRECTORIES = new Set([
   "node_modules",
@@ -35,13 +36,25 @@ const IGNORED_DIRECTORIES = new Set([
 // regular file found. Shared by anything that needs to look at every
 // file once - which extensions to filter by is up to the caller.
 // (excludedDirs skips other workspaces nested inside this one)
-function walkFiles(directory, excludedDirs, visit) {
+//
+// Two things stop a subtree from contributing files beyond the fixed
+// IGNORED_DIRECTORIES safety list:
+//  - .gitignore rules, accumulated as the walk descends (a nested
+//    .gitignore adds more rules for its own subtree, same as git)
+//  - a subdirectory that is itself a separate git repository (has its
+//    own .git) - e.g. a runtime-cloned copy of another project. That
+//    is a different codebase, not this project's own source, so its
+//    files must never count as usage evidence here.
+function walkFiles(directory, excludedDirs, visit, gitignoreStack = []) {
   let entries;
   try {
     entries = fs.readdirSync(directory);
   } catch (error) {
     return;
   }
+
+  const ownRules = loadGitignoreRules(directory);
+  const stack = ownRules.length > 0 ? gitignoreStack.concat([{ baseDir: directory, rules: ownRules }]) : gitignoreStack;
 
   for (const item of entries) {
     if (IGNORED_DIRECTORIES.has(item)) {
@@ -61,8 +74,15 @@ function walkFiles(directory, excludedDirs, visit) {
       continue;
     }
 
+    if (stack.length > 0 && isIgnoredByGitignore(stack, fullPath, stats.isDirectory())) {
+      continue;
+    }
+
     if (stats.isDirectory()) {
-      walkFiles(fullPath, excludedDirs, visit);
+      if (isNestedRepoBoundary(fullPath)) {
+        continue;
+      }
+      walkFiles(fullPath, excludedDirs, visit, stack);
     } else {
       visit(fullPath, item);
     }
@@ -71,10 +91,20 @@ function walkFiles(directory, excludedDirs, visit) {
 
 // Find files under a directory matching the given extensions
 function findSourceFiles(directory, extensions, excludedDirs = new Set()) {
+  return findFiles(directory, (name) => extensions.some((ext) => name.endsWith(ext)), excludedDirs);
+}
+
+// Find files under a directory whose name satisfies `matches(name,
+// fullPath)` - the same walk (and the same .gitignore/nested-repo/
+// ignored-directory rules) as findSourceFiles, just not limited to
+// language extensions. Used for non-source evidence files: Makefiles,
+// shell scripts, etc. (`fullPath` lets a predicate care about location,
+// e.g. only matching *.yml under .github/workflows/).
+function findFiles(directory, matches, excludedDirs = new Set()) {
   const files = [];
 
   walkFiles(directory, excludedDirs, (fullPath, name) => {
-    if (extensions.some((ext) => name.endsWith(ext))) {
+    if (matches(name, fullPath)) {
       files.push(fullPath);
     }
   });
@@ -108,12 +138,15 @@ function findExtensionsPresent(directory, excludedDirs = new Set()) {
 }
 
 // Find every workspace root - anywhere with a package manifest
-// (covers single packages, apps/*, packages/*, or any other layout)
+// (covers single packages, apps/*, packages/*, or any other layout).
+// Respects the same .gitignore rules and nested-repo boundaries as
+// walkFiles, so a manifest inside an ignored or vendored/cloned
+// subtree is never mistaken for one of this project's own workspaces.
 function findWorkspaceRoots(startDir) {
   const manifests = manifestFileNames();
   const roots = [];
 
-  function walk(dir) {
+  function walk(dir, gitignoreStack) {
     if (manifests.some((name) => fs.existsSync(path.join(dir, name)))) {
       roots.push(dir);
     }
@@ -125,15 +158,28 @@ function findWorkspaceRoots(startDir) {
       return;
     }
 
+    const ownRules = loadGitignoreRules(dir);
+    const stack = ownRules.length > 0 ? gitignoreStack.concat([{ baseDir: dir, rules: ownRules }]) : gitignoreStack;
+
     for (const entry of entries) {
       if (!entry.isDirectory() || IGNORED_DIRECTORIES.has(entry.name)) {
         continue;
       }
-      walk(path.join(dir, entry.name));
+
+      const fullPath = path.join(dir, entry.name);
+
+      if (stack.length > 0 && isIgnoredByGitignore(stack, fullPath, true)) {
+        continue;
+      }
+      if (isNestedRepoBoundary(fullPath)) {
+        continue;
+      }
+
+      walk(fullPath, stack);
     }
   }
 
-  walk(startDir);
+  walk(startDir, []);
   return roots;
 }
 
@@ -146,6 +192,7 @@ function getWorkspaceLabel(root, projectPath) {
 module.exports = {
   IGNORED_DIRECTORIES,
   findSourceFiles,
+  findFiles,
   findExtensionsPresent,
   findWorkspaceRoots,
   getWorkspaceLabel,

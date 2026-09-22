@@ -4,11 +4,11 @@
   "description": "A tiny developer companion that snoops around your dependencies.",
   "main": "src/index.js",
   "bin": {
-    "snooply": "./src/index.js"
+    "snooply": "src/index.js"
   },
   "scripts": {
     "start": "node ./src/index.js",
-    "test": "node ./test/matching.test.js && node ./test/package-managers.test.js && node ./test/parser-accuracy.test.js && node ./test/confidence.test.js && node ./test/javascript-typescript.test.js && node ./test/error-handling.test.js && node ./test/performance.test.js && node ./test/cli.test.js"
+    "test": "node ./test/matching.test.js && node ./test/package-managers.test.js && node ./test/parser-accuracy.test.js && node ./test/confidence.test.js && node ./test/javascript-typescript.test.js && node ./test/error-handling.test.js && node ./test/performance.test.js && node ./test/cli.test.js && node ./test/ignore.test.js && node ./test/usage-evidence.test.js"
   },
   "keywords": [
     "dependencies",

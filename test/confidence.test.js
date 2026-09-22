@@ -43,11 +43,16 @@ function makeFixture(files) {
 // Run the real pipeline: manifest -> analyzers -> recommendation engine
 async function findingsFor(dir) {
   const manifest = readManifest(dir);
-  const { usage, files, skippedFiles, matchConfidence } = await analyzeWorkspace(dir, manifest.dependencies, new Set());
+  const { usage, files, skippedFiles, matchConfidence, nonImportEvidence } = await analyzeWorkspace(
+    dir,
+    manifest.dependencies,
+    new Set()
+  );
   return buildResults(usage, manifest.devDependencyNames, {
     skippedFiles,
     totalFiles: files.length,
     matchConfidence,
+    evidence: nonImportEvidence,
   });
 }
 
@@ -279,6 +284,80 @@ function restoreReadable(paths) {
     const axiosFinding = findingFor(result, "axios");
     assert.ok(axiosFinding, "a real unused dependency must still be flagged");
     assert.strictEqual(axiosFinding.confidence, "HIGH");
+  });
+
+  // ================= Non-import usage evidence =================
+
+  await test("HIGH: a CLI-invoked dependency (uvicorn via Makefile) is never flagged unused", async () => {
+    const dir = makeFixture({
+      "requirements.txt": "uvicorn\n",
+      "app.py": "print('server code, no direct uvicorn import')\n",
+      Makefile: "dev:\n\tuvicorn main:app --reload\n",
+    });
+    const result = await findingsFor(dir);
+    assert.strictEqual(findingFor(result, "uvicorn"), undefined);
+  });
+
+  await test("HIGH: a package-script-invoked dependency is never flagged unused, even as a prod dependency", async () => {
+    const dir = makeFixture({
+      "package.json": JSON.stringify({
+        dependencies: { vitest: "1.0.0" },
+        scripts: { test: "vitest run" },
+      }),
+      "index.js": "console.log('hi');",
+    });
+    const result = await findingsFor(dir);
+    assert.strictEqual(findingFor(result, "vitest"), undefined);
+  });
+
+  await test("MEDIUM: a framework-shaped name with zero evidence is downgraded, not suppressed", async () => {
+    // "vite" has no import, no script, no CLI command anywhere in this
+    // fixture - genuinely no evidence - but its name is a known
+    // framework/build-tool shape, which is weaker grounds for "unused"
+    // than an ordinary library in the same position.
+    const dir = makeFixture({
+      "package.json": JSON.stringify({ dependencies: { vite: "1.0.0" } }),
+      "index.js": "console.log('hi');",
+    });
+    const result = await findingsFor(dir);
+    const finding = findingFor(result, "vite");
+    assert.ok(finding, "still shown - not silently hidden just for having a familiar name");
+    assert.strictEqual(finding.confidence, "MEDIUM");
+    assert.ok(/framework|build tool|runtime/.test(finding.reason), finding.reason);
+  });
+
+  await test("Ambiguous dependency usage does not become HIGH confidence", async () => {
+    const dir = makeFixture({
+      "package.json": JSON.stringify({ dependencies: { webpack: "1.0.0" } }),
+      "index.js": "console.log('hi');",
+    });
+    const result = await findingsFor(dir);
+    const finding = findingFor(result, "webpack");
+    assert.ok(finding);
+    assert.notStrictEqual(finding.confidence, "HIGH");
+  });
+
+  await test("Genuinely unused, ordinary (non-framework) package is still detected at HIGH confidence", async () => {
+    const dir = makeFixture({
+      "package.json": JSON.stringify({ dependencies: { axios: "1.0.0" } }),
+      "index.js": "console.log('hi');",
+    });
+    const result = await findingsFor(dir);
+    const finding = findingFor(result, "axios");
+    assert.ok(finding);
+    assert.strictEqual(finding.confidence, "HIGH");
+  });
+
+  await test("CLI evidence for one dependency does not incorrectly credit an unrelated sibling", async () => {
+    const dir = makeFixture({
+      "requirements.txt": "uvicorn\ngunicorn\n",
+      "app.py": "print('no direct imports of either')\n",
+      Makefile: "dev:\n\tuvicorn main:app --reload\n",
+    });
+    const result = await findingsFor(dir);
+    assert.strictEqual(findingFor(result, "uvicorn"), undefined, "uvicorn has real CLI evidence");
+    const gunicornFinding = findingFor(result, "gunicorn");
+    assert.ok(gunicornFinding, "gunicorn has no evidence at all and must still be flagged");
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

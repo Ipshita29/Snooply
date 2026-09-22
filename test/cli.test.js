@@ -385,6 +385,53 @@ function runCli(cwd, args = [], waitMs = 1800) {
     }
   });
 
+  // ================= End-to-end: CodeMap-style real-world project =================
+
+  await test("CLI: CodeMap-style project (cloned repos, generated analysis, CLI-only deps) reports cleanly", async () => {
+    // Reproduces the real false-positive report end to end: a
+    // backend/ with its own .gitignore excluding cloned_repos/ and
+    // analysis/, dependencies imported under a different name than
+    // declared (GitPython -> git, fpdf2 -> fpdf), a CLI-only
+    // dependency (uvicorn, invoked from a Makefile, never imported),
+    // and a genuinely unused dependency that must still be caught.
+    const dir = makeFixture({
+      "backend/.gitignore": "cloned_repos/\nanalysis/\n",
+      "backend/requirements.txt": "gitpython\nfpdf2\nuvicorn\nfastapi\nrequests\n",
+      "backend/actual_source/main.py": [
+        "from git import Repo",
+        "from fpdf import FPDF",
+        "from fastapi import FastAPI",
+        "",
+        "app = FastAPI()",
+        "",
+        "def clone(url):",
+        "    Repo.clone_from(url, '/tmp/x')",
+        "",
+        "def make_pdf():",
+        "    return FPDF()",
+      ].join("\n"),
+      "backend/Makefile": "dev:\n\tuvicorn main:app --reload\n",
+      // Runtime-cloned repos and generated output - must never
+      // contribute findings or usage evidence to the backend
+      "backend/cloned_repos/repo-A/.git/HEAD": "ref: refs/heads/main\n",
+      "backend/cloned_repos/repo-A/requirements.txt": "flask\nnumpy\n",
+      "backend/cloned_repos/repo-A/app.py": "import flask\nimport numpy\nimport requests\n",
+      "backend/analysis/report.py": "import pandas\nimport requests\n",
+    });
+
+    const { stdout } = await runCli(path.join(dir, "backend"));
+
+    // The real bug: GitPython/fpdf2/uvicorn falsely flagged unused
+    assert.ok(!stdout.includes("gitpython"), stdout);
+    assert.ok(!stdout.includes("fpdf2"), stdout);
+    assert.ok(!stdout.includes("uvicorn"), stdout);
+    assert.ok(!stdout.includes("fastapi"), stdout);
+
+    // A genuinely unused dependency must still be reported
+    assert.ok(stdout.includes("requests"), stdout);
+    assert.ok(/found 1 thing/.test(stdout), stdout);
+  });
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exitCode = failed > 0 ? 1 : 0;
 })();
