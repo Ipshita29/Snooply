@@ -189,6 +189,54 @@ function getWorkspaceLabel(root, projectPath) {
   return relative === "" ? "root" : relative.split(path.sep).join("/");
 }
 
+// Is `targetPath` (a single already-known file, not necessarily found
+// by walking) excluded by the same rules walkFiles enforces - the
+// fixed safety list, .gitignore, and nested-repo boundaries? Used when
+// something outside the normal top-down walk needs to check one path
+// on its own, e.g. following a script reference to confirm the target
+// is actually part of this project's own source before reading it.
+function isPathExcluded(root, targetPath) {
+  const relative = path.relative(root, targetPath);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    return true;
+  }
+
+  const segments = relative.split(path.sep);
+  let current = root;
+  const gitignoreStack = [];
+
+  const rootRules = loadGitignoreRules(root);
+  if (rootRules.length > 0) {
+    gitignoreStack.push({ baseDir: root, rules: rootRules });
+  }
+
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+    if (IGNORED_DIRECTORIES.has(segment)) {
+      return true;
+    }
+
+    current = path.join(current, segment);
+    const isLastSegment = i === segments.length - 1;
+
+    if (isIgnoredByGitignore(gitignoreStack, current, !isLastSegment)) {
+      return true;
+    }
+
+    if (!isLastSegment) {
+      if (isNestedRepoBoundary(current)) {
+        return true;
+      }
+      const rules = loadGitignoreRules(current);
+      if (rules.length > 0) {
+        gitignoreStack.push({ baseDir: current, rules });
+      }
+    }
+  }
+
+  return false;
+}
+
 module.exports = {
   IGNORED_DIRECTORIES,
   findSourceFiles,
@@ -196,4 +244,5 @@ module.exports = {
   findExtensionsPresent,
   findWorkspaceRoots,
   getWorkspaceLabel,
+  isPathExcluded,
 };

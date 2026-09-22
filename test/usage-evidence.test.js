@@ -183,6 +183,122 @@ function typesFor(evidence, dep) {
     assert.deepStrictEqual(typesFor(evidence, "uvicorn"), []);
   });
 
+  // ================= Local wrapper-script following =================
+
+  await test("Direct command (no wrapper) still counts as evidence", async () => {
+    const dir = makeFixture({
+      "package.json": JSON.stringify({ scripts: { dev: "uvicorn main:app --reload" } }),
+    });
+    const evidence = collectNonImportEvidence(dir, new Set(["uvicorn"]), new Set());
+    assert.deepStrictEqual(typesFor(evidence, "uvicorn"), [EVIDENCE.PACKAGE_SCRIPT]);
+  });
+
+  await test("npm script -> local wrapper shell script: the wrapped command is followed", async () => {
+    const dir = makeFixture({
+      "package.json": JSON.stringify({ scripts: { dev: "./scripts/dev.sh" } }),
+      "scripts/dev.sh": "#!/bin/sh\nuvicorn main:app --reload\n",
+    });
+    const evidence = collectNonImportEvidence(dir, new Set(["uvicorn"]), new Set());
+    assert.ok(typesFor(evidence, "uvicorn").includes(EVIDENCE.CLI_COMMAND), JSON.stringify(evidence));
+  });
+
+  await test("Makefile -> local wrapper shell script: the wrapped command is followed", async () => {
+    const dir = makeFixture({
+      Makefile: "dev:\n\t./scripts/dev.sh\n",
+      "scripts/dev.sh": "uvicorn main:app --reload\n",
+    });
+    const evidence = collectNonImportEvidence(dir, new Set(["uvicorn"]), new Set());
+    // scripts/dev.sh is found both directly (it's independently scanned
+    // as a *.sh file) and via following the Makefile's reference to it -
+    // duplicate evidence entries are harmless, only presence is checked
+    assert.ok(typesFor(evidence, "uvicorn").includes(EVIDENCE.CLI_COMMAND), JSON.stringify(evidence));
+  });
+
+  await test("Package-manager command -> local executable with no recognized extension is still followed", async () => {
+    const dir = makeFixture({
+      "package.json": JSON.stringify({ scripts: { dev: "./scripts/dev" } }),
+      "scripts/dev": "#!/bin/sh\nuvicorn main:app --reload\n",
+    });
+    const evidence = collectNonImportEvidence(dir, new Set(["uvicorn"]), new Set());
+    assert.ok(typesFor(evidence, "uvicorn").includes(EVIDENCE.CLI_COMMAND), JSON.stringify(evidence));
+  });
+
+  await test("Nested wrapper: a chain of scripts (a -> b -> c) is followed to the real command", async () => {
+    const dir = makeFixture({
+      Makefile: "dev:\n\t./scripts/a.sh\n",
+      "scripts/a.sh": "./scripts/b.sh\n",
+      "scripts/b.sh": "./scripts/c.sh\n",
+      "scripts/c.sh": "uvicorn main:app --reload\n",
+    });
+    const evidence = collectNonImportEvidence(dir, new Set(["uvicorn"]), new Set());
+    assert.deepStrictEqual(typesFor(evidence, "uvicorn"), [EVIDENCE.CLI_COMMAND]);
+  });
+
+  await test("Missing script: a reference to a script that doesn't exist is not evidence and does not crash", async () => {
+    const dir = makeFixture({
+      "package.json": JSON.stringify({ scripts: { dev: "./scripts/missing.sh" } }),
+    });
+    const evidence = collectNonImportEvidence(dir, new Set(["uvicorn"]), new Set());
+    assert.deepStrictEqual(typesFor(evidence, "uvicorn"), []);
+  });
+
+  await test("Circular script references terminate instead of looping forever", async () => {
+    const dir = makeFixture({
+      "package.json": JSON.stringify({ scripts: { dev: "./scripts/a.sh" } }),
+      "scripts/a.sh": "./scripts/b.sh\n",
+      "scripts/b.sh": "./scripts/a.sh\nuvicorn main:app --reload\n",
+    });
+    const start = Date.now();
+    const evidence = collectNonImportEvidence(dir, new Set(["uvicorn"]), new Set());
+    const elapsedMs = Date.now() - start;
+    assert.ok(elapsedMs < 2000, `circular reference should resolve quickly, took ${elapsedMs}ms`);
+    assert.ok(typesFor(evidence, "uvicorn").includes(EVIDENCE.CLI_COMMAND), JSON.stringify(evidence));
+  });
+
+  await test("Unrelated text mentioning the command in a wrapper script's comment is not evidence", async () => {
+    const dir = makeFixture({
+      "package.json": JSON.stringify({ scripts: { dev: "./scripts/dev.sh" } }),
+      "scripts/dev.sh": "# uvicorn is installed separately, not run from here\necho hi\n",
+    });
+    const evidence = collectNonImportEvidence(dir, new Set(["uvicorn"]), new Set());
+    assert.deepStrictEqual(typesFor(evidence, "uvicorn"), []);
+  });
+
+  await test("A followed wrapper script respects .gitignore - a target inside an ignored directory is not read", async () => {
+    const dir = makeFixture({
+      ".gitignore": "cache_data/\n",
+      "package.json": JSON.stringify({ scripts: { dev: "./cache_data/dev.sh" } }),
+      "cache_data/dev.sh": "uvicorn main:app --reload\n",
+    });
+    const evidence = collectNonImportEvidence(dir, new Set(["uvicorn"]), new Set());
+    assert.deepStrictEqual(typesFor(evidence, "uvicorn"), []);
+  });
+
+  await test("A wrapper reference cannot escape the project root via ../", async () => {
+    const outer = fs.mkdtempSync(path.join(os.tmpdir(), "snooply-evidence-test-"));
+    fs.mkdirSync(path.join(outer, "project"));
+    fs.writeFileSync(
+      path.join(outer, "project", "package.json"),
+      JSON.stringify({ scripts: { dev: "../outside.sh" } })
+    );
+    fs.writeFileSync(path.join(outer, "outside.sh"), "uvicorn main:app --reload\n");
+
+    const evidence = collectNonImportEvidence(path.join(outer, "project"), new Set(["uvicorn"]), new Set());
+    assert.deepStrictEqual(typesFor(evidence, "uvicorn"), []);
+  });
+
+  await test("A bare command name (no path) is never followed as a file, even if a same-named local file exists", async () => {
+    // "uvicorn" here is a bare $PATH-resolved command, not a reference
+    // to the local file "uvicorn" that happens to sit next to it -
+    // only an explicit relative path ("./uvicorn") is ever followed.
+    const dir = makeFixture({
+      "package.json": JSON.stringify({ scripts: { dev: "uvicorn main:app --reload" } }),
+      uvicorn: "this file must never be read as a wrapper script",
+    });
+    const evidence = collectNonImportEvidence(dir, new Set(["uvicorn"]), new Set());
+    assert.deepStrictEqual(typesFor(evidence, "uvicorn"), [EVIDENCE.PACKAGE_SCRIPT]);
+  });
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exitCode = failed > 0 ? 1 : 0;
 })();
