@@ -117,11 +117,19 @@ function loadGitignoreRules(directory) {
 // Does the accumulated stack of .gitignore rules (root-to-leaf order,
 // each with the directory it was found in) say `fullPath` is ignored?
 // Later rules win over earlier ones - including a nested .gitignore
-// overriding a broader rule from an ancestor - the same as real git,
-// though (unlike git) a negation here can still re-include a path
-// whose parent directory was already excluded; that edge case is rare
-// enough that a simpler "last matching rule wins" model is a practical
-// trade-off rather than a full reimplementation of git's own engine.
+// overriding a broader rule from an ancestor, and a later line in the
+// same file overriding an earlier one - the same as real git.
+//
+// This function only decides one path at a time; it's the caller
+// (walkFiles/findWorkspaceRoots) that gives this real git semantics
+// for "a negated pattern cannot resurrect a file whose parent
+// directory is excluded": once a directory itself matches an ignore
+// rule, the caller never recurses into it at all, so nothing under it
+// - including a nested .gitignore's own negations - is ever consulted.
+// That mirrors git's own traversal (it doesn't walk into an ignored
+// directory to look for re-inclusion rules either), so the trade-off
+// once noted here doesn't actually apply - see test/ignore.test.js for
+// the exact "build/ + !build/important.js" case this guarantees.
 function isIgnoredByGitignore(ruleStack, fullPath, isDirectory) {
   let ignored = false;
 
